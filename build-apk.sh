@@ -1,7 +1,9 @@
 #!/bin/bash
 # Manual APK build (Gradle daemon is unavailable in this environment).
 # Requires: JDK 17 (~/tools/jdk), Android SDK (~/tools/sdk), kotlinc (~/tools/kotlinc)
+# Requires env: VUMETER_KS_PASS = keystore password (never write it in this file).
 set -e
+: "${VUMETER_KS_PASS:?Set VUMETER_KS_PASS to the keystore password}"
 export JAVA_HOME=~/tools/jdk
 export PATH=$JAVA_HOME/bin:$PATH
 BT=~/tools/sdk/build-tools/36.0.0
@@ -17,7 +19,7 @@ $BT/aapt2 link -o $OUT/base.apk -I $AJAR --manifest $SRC/app/src/main/AndroidMan
   $OUT/res.zip
 (cd $OUT/dex && $BT/aapt add ../base.apk classes.dex)
 $BT/zipalign -p -f 4 $OUT/base.apk $OUT/aligned.apk
-$BT/apksigner sign --ks $SRC/vumeter.keystore --ks-pass pass:vumeter --key-pass pass:vumeter \
+$BT/apksigner sign --ks $SRC/vumeter.keystore --ks-pass env:VUMETER_KS_PASS --key-pass env:VUMETER_KS_PASS \
   --out $OUT/VuMeter.apk $OUT/aligned.apk
 cp $OUT/VuMeter.apk ~/workspace/your_files/VuMeter.apk
 echo "Built: ~/workspace/your_files/VuMeter.apk"
