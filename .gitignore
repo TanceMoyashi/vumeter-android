@@ -1,0 +1,16 @@
+# Signing key - NEVER commit (keep this file safe locally; it signs all updates)
+*.keystore
+
+# Local machine settings
+local.properties
+
+# Build outputs
+app/build/
+build/
+*.apk
+
+# Icon design previews (regenerable with make_icon.py)
+icon_preview*.png
+
+# OS / editor noise
+.DS_Store
