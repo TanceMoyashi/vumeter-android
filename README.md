@@ -4,7 +4,7 @@ Android向けVUメーターアプリ。本体マイク／USBオーディオイ�
 
 - パッケージ名: `jp.himawari.vumeter`
 - 対応: Android 12 (API 31) 以降 / Pixel 10 (Android 17) で設計・動作想定
-- 現在のバージョン: v1.4
+- 現在のバージョン: v1.5
 
 ## 機能
 
@@ -16,11 +16,13 @@ Android向けVUメーターアプリ。本体マイク／USBオーディオイ�
 - 位相相関メーター
 - 校正用 1kHz トーン出力（基準レベルちょうど）
 - 測定値のCSVログ（ダウンロードフォルダに保存）
+- 録音エンジン切替: AudioRecord / AAudio（ネイティブ低レイテンシ）
 
 ## ソース構成
 
 - `app/src/main/java/jp/himawari/vumeter/` — Kotlinソース
-  （MainActivity / VuEngine / MeterView / AudioExtras）
+  （MainActivity / VuEngine / MeterView / AudioExtras / AAudioCapture）
+- `app/src/main/cpp/` — AAudioキャプチャのネイティブソース（C++）
 - `app/src/main/AndroidManifest.xml`, `app/src/main/res/` — マニフェストとリソース
 - `make_icon.py` — ランチャーアイコンの再生成スクリプト
   （アイコンPNGは生成物のためリポジトリには含めていません。このスクリプトで再生成できます）

@@ -4,7 +4,8 @@ VUメーター（jp.himawari.vumeter）のソース構成と実装仕様の説�
 
 ## 技術構成
 
-- 言語：Kotlin（フレームワークのみ使用。AndroidX / Jetpack Compose は不使用、ネイティブコードなし）
+- 言語：Kotlin（フレームワークのみ使用。AndroidX / Jetpack Compose は不使用）
+  ＋ AAudio キャプチャ用のネイティブライブラリ（C++ / JNI、arm64-v8a のみ）
 - compileSdk 36 / targetSdk 36 / minSdk 31（Android 12以降）
 - 依存ライブラリ：kotlin-stdlib のみ
 
@@ -15,7 +16,10 @@ app/src/main/java/jp/himawari/vumeter/
 ├── MainActivity.kt  … 画面構築、入力デバイス選択、録音制御、トーン／ログ連携
 ├── VuEngine.kt      … 測定エンジン（VUバリスティクス、ラウドネス、相関、ピーク）
 ├── MeterView.kt     … 描画（MeterView / PeakBarView / CorrelationView）
-└── AudioExtras.kt   … TonePlayer（校正トーン）、CsvLogger（CSVログ）
+├── AudioExtras.kt   … TonePlayer（校正トーン）、CsvLogger（CSVログ）
+└── AAudioCapture.kt … AAudioエンジンのJNIラッパー
+app/src/main/cpp/
+└── aaudio_capture.cpp … AAudio入力ストリームとリングバッファ（ネイティブ）
 app/src/main/
 ├── AndroidManifest.xml
 └── res/             … アイコン、色定義、アダプティブアイコン定義
@@ -79,6 +83,25 @@ build-apk.sh         … 開発環境専用の手動ビルド手順（通常の�
   - 列：時刻（ISO）/ 経過秒 / VU L,R / 瞬時ピーク / ホールドピーク /
     ラウドネス M,S,I / 相関 / クリップ / 基準レベル
 
+## 録音エンジン（AudioRecord / AAudio）
+
+画面の「録音エンジン」で2方式を切り替えられる。測定エンジン（VuEngine）へは
+どちらもインターリーブ済み float（-1..1）を渡すため、表示や測定結果の扱いは共通。
+
+- **AudioRecord**：従来方式。音源（UNPROCESSED → VOICE_RECOGNITION → MIC）、
+  サンプルレート（48k → 44.1k）、チャンネル（ステレオ → モノラル）の順に
+  フォールバックしながら開始する
+- **AAudio**（`AAudioCapture.kt` + `cpp/aaudio_capture.cpp`）：
+  ネイティブの低レイテンシAPI。SHAREDモード＋LOW_LATENCYで入力ストリームを開き、
+  データコールバックが約1秒分のリングバッファへ書き込み、Kotlin側が読み出す
+  - フォーマットは PCM_FLOAT を優先し、不可なら PCM_I16（コールバック内で変換）
+  - 入力デバイスは AudioManager のデバイスIDで指定する
+  - プリセットは UNPROCESSED → VOICE_RECOGNITION → GENERIC の順に試行
+  - リングバッファが溢れた場合は古いフレームから捨て、ドロップ数を数える。
+    停止時に XRun 回数とドロップ数があればステータスに表示する
+  - 開始できなかった場合は AudioRecord に自動で切り替わり、その旨がステータスに出る
+  - ネイティブライブラリ（libaaudio_capture.so）は arm64-v8a のみビルドして同梱する
+
 ## 基準レベル
 
 0 VU に対応するデジタルレベルを -24 / -20 / -18 / -16 / -14 dBFS から選択する
@@ -94,7 +117,9 @@ build-apk.sh         … 開発環境専用の手動ビルド手順（通常の�
 
 通常は Android Studio でプロジェクトを開いてビルドする。
 `build-apk.sh` は開発環境（Gradleデーモンが使えない環境）専用の手動手順で、
-参考資料として同梱している。
+参考資料として同梱している。AAudio のネイティブライブラリのビルドには
+Android NDK が必要で、生成された .so はリポジトリには含めていない
+（`build-apk.sh` 内の clang 実行で再生成される）。
 
 ## 署名について
 

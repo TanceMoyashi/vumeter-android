@@ -45,6 +45,8 @@ class MainActivity : Activity() {
     private var options: List<InputOption> = emptyList()
     private var engine: VuEngine? = null
     private var recorder: AudioRecord? = null
+    private var aaudio: AAudioCapture? = null
+    private var useAAudio = false
     private var captureThread: Thread? = null
     @Volatile private var running = false
     private var sampleRate = 48000
@@ -231,6 +233,28 @@ class MainActivity : Activity() {
         deviceRow.addView(refreshButton)
         root.addView(deviceRow)
 
+        // Capture engine selection: AudioRecord (Java API) or AAudio (native, low latency)
+        root.addView(sectionLabel("録音エンジン"))
+        val engineGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
+        val rbAudioRecord = RadioButton(this).apply {
+            text = "AudioRecord"
+            textSize = 15f
+            setTextColor(Color.rgb(230, 230, 235))
+        }
+        val rbAAudio = RadioButton(this).apply {
+            text = "AAudio"
+            textSize = 15f
+            setTextColor(Color.rgb(230, 230, 235))
+        }
+        engineGroup.addView(rbAudioRecord)
+        engineGroup.addView(rbAAudio)
+        engineGroup.check(rbAudioRecord.id)
+        engineGroup.setOnCheckedChangeListener { _, checkedId ->
+            useAAudio = checkedId == rbAAudio.id
+            if (running) startCapture()
+        }
+        root.addView(engineGroup)
+
         // Reference level selection
         root.addView(sectionLabel("基準レベル（0 VU）"))
         val refGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
@@ -410,6 +434,69 @@ class MainActivity : Activity() {
             return
         }
         stopCapture()
+        if (useAAudio && startCaptureAAudio()) {
+            return
+        }
+        startCaptureAudioRecord()
+    }
+
+    private fun startCaptureAAudio(): Boolean {
+        val option = options.getOrNull(deviceSpinner.selectedItemPosition)
+        val cap = AAudioCapture()
+        if (!cap.available) {
+            statusText.text = "AAudioライブラリを読み込めなかったため、AudioRecordで開始します"
+            return false
+        }
+        val presets = intArrayOf(
+            AAudioCapture.PRESET_UNPROCESSED,
+            AAudioCapture.PRESET_VOICE_RECOGNITION,
+            AAudioCapture.PRESET_GENERIC
+        )
+        val presetNames = arrayOf("UNPROCESSED", "VOICE_RECOGNITION", "GENERIC")
+        val deviceId = option?.device?.id ?: 0
+        for (i in presets.indices) {
+            val result = cap.start(deviceId, 48000, 2, presets[i]) ?: continue
+            val rate = result[0]
+            val ch = result[1]
+            val eng = VuEngine(rate)
+            eng.referenceDbfs = referenceDbfs
+            engine = eng
+            aaudio = cap
+            sampleRate = rate
+            channels = ch
+            running = true
+            captureThread = Thread { readLoopAAudio(cap) }.apply {
+                name = "vu-capture-aaudio"
+                start()
+            }
+            val devName = option?.device?.productName?.toString() ?: "既定の入力"
+            statusText.text = "測定中［AAudio］: $devName / $rate Hz / " +
+                (if (ch == 2) "ステレオ" else "モノラル") + " / " + presetNames[i]
+            startButton.text = "停止"
+            captureStartMs = android.os.SystemClock.elapsedRealtime()
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            handler.post(uiLoop)
+            return true
+        }
+        statusText.text = "AAudioを開始できなかったため、AudioRecordで開始します"
+        return false
+    }
+
+    private fun readLoopAAudio(cap: AAudioCapture) {
+        val eng = engine ?: return
+        val ch = channels
+        val fbuf = FloatArray(4096 * 2)
+        while (running) {
+            val frames = cap.read(fbuf, 4096)
+            if (frames > 0) {
+                eng.process(fbuf, frames, ch)
+            } else if (frames < 0) {
+                break
+            }
+        }
+    }
+
+    private fun startCaptureAudioRecord() {
         val option = options.getOrNull(deviceSpinner.selectedItemPosition)
         val sources = intArrayOf(
             MediaRecorder.AudioSource.UNPROCESSED,
@@ -463,7 +550,7 @@ class MainActivity : Activity() {
                             MediaRecorder.AudioSource.VOICE_RECOGNITION -> "VOICE_RECOGNITION"
                             else -> "MIC"
                         }
-                        statusText.text = "測定中: $routed / $rate Hz / " +
+                        statusText.text = "測定中［AudioRecord］: $routed / $rate Hz / " +
                             (if (channels == 2) "ステレオ" else "モノラル") + " / $srcName"
                         started = true
                         break@outer
@@ -500,7 +587,7 @@ class MainActivity : Activity() {
     }
 
     private fun stopCapture() {
-        if (!running && recorder == null) return
+        if (!running && recorder == null && aaudio == null) return
         running = false
         handler.removeCallbacks(uiLoop)
         try {
@@ -516,10 +603,21 @@ class MainActivity : Activity() {
         }
         recorder?.release()
         recorder = null
+        var aaNote = ""
+        val cap = aaudio
+        if (cap != null) {
+            val xr = cap.xRunCount()
+            val dr = cap.droppedFrames()
+            cap.stop()
+            aaudio = null
+            if (xr > 0 || dr > 0) {
+                aaNote = "（AAudio: XRun ${xr}回 / ドロップ ${dr}フレーム）"
+            }
+        }
         startButton.text = "測定開始"
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (statusText.text?.startsWith("測定中") == true) {
-            statusText.text = "停止しました"
+            statusText.text = "停止しました" + aaNote
         }
         stopLogging()
     }

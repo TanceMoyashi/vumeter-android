@@ -2,6 +2,14 @@
 
 VUメーター（jp.himawari.vumeter）のバージョン履歴です。
 
+## v1.5 — 2026-10-31 (versionCode 6)
+
+- 録音エンジンの切替を追加（AudioRecord / AAudio）
+  - AAudio はネイティブの低レイテンシAPI。入力デバイスの指定、UNPROCESSED等の
+    プリセット指定に対応し、開始できなかった場合は AudioRecord に自動で切り替わる
+  - 停止時に AAudio の XRun 回数とドロップフレーム数をステータスに表示
+  - ネイティブライブラリは arm64-v8a のみ同梱
+
 ## v1.4 — 2026-10-31 (versionCode 5)
 
 - ランチャーアイコンを実装
