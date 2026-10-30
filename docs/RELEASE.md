@@ -48,7 +48,9 @@ VUメーターの新しいバージョンを公開する手順です。
 1. リポジトリの Releases ページで「Draft a new release」を開く
 2. Choose a tag で `v<versionName>`（例：v1.5）と入力し、新規タグを作成する
 3. Release title にも同じタグ名を入れる
-4. 本文には `CHANGELOG.md` の該当節を貼る
+4. 本文には `CHANGELOG.md` の該当節を貼る。あわせて、README の
+   「このアプリについて」（実験的なアプリであること、利用は自己責任、
+   更新・バグ対応の保証なし）の要旨も含めること
 5. 添付エリアにビルドした `VuMeter.apk` をドラッグ＆ドロップする
 6. 「Publish release」を押す
 
