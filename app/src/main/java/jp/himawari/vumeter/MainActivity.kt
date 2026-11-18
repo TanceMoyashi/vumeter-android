@@ -60,6 +60,7 @@ class MainActivity : Activity() {
     private lateinit var statusText: TextView
     private lateinit var bigPeakText: TextView
     private lateinit var infoText: TextView
+    private lateinit var settingsStateText: TextView
     private lateinit var startButton: Button
     private lateinit var leverSwitch: LeverSwitchView
     private lateinit var stageView: LinearLayout
@@ -222,7 +223,7 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.rgb(13, 13, 16))
         }
 
-        // Main screen: ONLY the meters and the independent dBTP peak display.
+        // Main screen: the meters plus always-visible readouts (v1.18).
         // No app title, no instructions, and no settings controls on the main screen.
         val mainLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -313,6 +314,43 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         )
 
+        // Front-panel readouts (always visible, v1.18): peak dBTP, VU/loudness
+        // values, current settings values (small), and the measurement status line.
+        bigPeakText = TextView(this).apply {
+            textSize = 18f
+            setTextColor(Color.rgb(238, 238, 244))
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(0, dp(8), 0, 0)
+            text = "L   --.- dBTP    R   --.- dBTP"
+        }
+        mainLayout.addView(bigPeakText)
+
+        infoText = TextView(this).apply {
+            textSize = 11.5f
+            setTextColor(Color.rgb(205, 205, 214))
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(0, dp(4), 0, 0)
+            text = "VU   L    ---   R    ---\nLOUDNESS  M  --.-  S  --.-  I  --.- LUFS    相関  ---"
+        }
+        mainLayout.addView(infoText)
+
+        settingsStateText = TextView(this).apply {
+            textSize = 11f
+            setTextColor(Color.rgb(160, 160, 168))
+            setPadding(0, dp(4), 0, 0)
+            text = ""
+        }
+        mainLayout.addView(settingsStateText)
+
+        statusText = TextView(this).apply {
+            textSize = 11f
+            setTextColor(Color.rgb(160, 160, 168))
+            setPadding(0, dp(2), 0, 0)
+            text = ""
+        }
+        mainLayout.addView(statusText)
+
         // Attach 700ms long-press handler to the main screen (single tap does nothing)
         val longPressTouchListener = View.OnTouchListener { _, event ->
             handleMainTouch(event)
@@ -324,6 +362,10 @@ class MainActivity : Activity() {
         meterL.setOnTouchListener(longPressTouchListener)
         meterR.setOnTouchListener(longPressTouchListener)
         ledMeter.setOnTouchListener(longPressTouchListener)
+        bigPeakText.setOnTouchListener(longPressTouchListener)
+        infoText.setOnTouchListener(longPressTouchListener)
+        settingsStateText.setOnTouchListener(longPressTouchListener)
+        statusText.setOnTouchListener(longPressTouchListener)
 
         rootFrame.addView(
             mainLayout,
@@ -405,6 +447,13 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun updateSettingsStateText() {
+        if (!::settingsStateText.isInitialized) return
+        val modeLabel = if (displayMode == MeterView.DisplayMode.VU) "VU" else "ラウドネス"
+        settingsStateText.text =
+            "基準 0 VU = ${referenceDbfs.toInt()} dBFS　モード $modeLabel　プリセット ${currentPreset().displayLabel}"
+    }
+
     private fun setRefLabels() {
         val label = "0 VU = ${referenceDbfs.toInt()} dBFS"
         meterAvg.refLabel = label
@@ -412,6 +461,7 @@ class MainActivity : Activity() {
         meterR.refLabel = label
         if (::ledMeter.isInitialized) ledMeter.referenceDbfs = referenceDbfs
         if (::leverSwitch.isInitialized) leverSwitch.value = referenceDbfs
+        updateSettingsStateText()
     }
 
     private fun syncDisplayMode() {
@@ -442,6 +492,7 @@ class MainActivity : Activity() {
         if (::meterAvg.isInitialized && ::meterRow.isInitialized) {
             applyOrientation(resources.configuration.orientation)
         }
+        updateSettingsStateText()
     }
 
     /**
@@ -610,34 +661,6 @@ class MainActivity : Activity() {
             ).apply { setMargins(0, dp(4), 0, 0) }
             container.addView(b, lp)
         }
-
-        // Independent True Peak (dBTP) & measurement readout inside settings panel
-        bigPeakText = TextView(this).apply {
-            textSize = 18f
-            setTextColor(Color.rgb(238, 238, 244))
-            typeface = android.graphics.Typeface.MONOSPACE
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setPadding(0, dp(16), 0, 0)
-            text = "L   --.- dBTP    R   --.- dBTP"
-        }
-        container.addView(bigPeakText)
-
-        infoText = TextView(this).apply {
-            textSize = 11.5f
-            setTextColor(Color.rgb(205, 205, 214))
-            typeface = android.graphics.Typeface.MONOSPACE
-            setPadding(0, dp(6), 0, 0)
-            text = "VU   L    ---   R    ---\nLOUDNESS  M  --.-  S  --.-  I  --.- LUFS    相関  ---"
-        }
-        container.addView(infoText)
-
-        statusText = TextView(this).apply {
-            textSize = 11f
-            setTextColor(Color.rgb(160, 160, 168))
-            setPadding(0, dp(6), 0, 0)
-            text = ""
-        }
-        container.addView(statusText)
 
         settingsOverlay.addView(container)
     }
