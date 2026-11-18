@@ -62,9 +62,8 @@ class MainActivity : Activity() {
     private lateinit var infoText: TextView
     private lateinit var settingsStateText: TextView
     private lateinit var startButton: Button
-    private lateinit var frontStartButton: Button
-    private lateinit var frontModeButton: Button
     private lateinit var holdButton: Button
+    private lateinit var runLamp: View
     private lateinit var leverSwitch: LeverSwitchView
     private lateinit var stageView: LinearLayout
     private lateinit var stageTop: LinearLayout
@@ -119,12 +118,34 @@ class MainActivity : Activity() {
             longPressRing.update(pressDownX, pressDownY, progress)
             if (elapsed >= LONG_PRESS_MS) {
                 pressActive = false
+                cancelPendingTap()
                 longPressRing.hide()
                 showSettings()
             } else {
                 handler.postDelayed(this, 16)
             }
         }
+    }
+
+    /** Tap / double-tap state for the front-panel gestures (v1.21):
+     *  single tap toggles VU <-> loudness, double tap toggles start/stop. */
+    private var lastTapUpMs = 0L
+    private var lastTapX = 0f
+    private var lastTapY = 0f
+    private var doubleTapPress = false
+    private val singleTapAction = Runnable {
+        displayMode = if (displayMode == MeterView.DisplayMode.VU) {
+            MeterView.DisplayMode.LOUDNESS
+        } else {
+            MeterView.DisplayMode.VU
+        }
+        syncDisplayMode()
+    }
+
+    private fun cancelPendingTap() {
+        handler.removeCallbacks(singleTapAction)
+        lastTapUpMs = 0L
+        doubleTapPress = false
     }
 
     /** LED-meter display levels with the IEC 60268-18 style return
@@ -211,6 +232,16 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         audioManager = getSystemService(AudioManager::class.java)
         buildUi()
+        // Predictive back (API 33+): with the settings panel open, the back
+        // button / gesture returns to the meter panel instead of finishing.
+        // (Older APIs use the onBackPressed override below.)
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_OVERLAY
+            ) {
+                if (settingsShown) hideSettings() else finish()
+            }
+        }
         refreshDevices()
         audioManager.registerAudioDeviceCallback(deviceCallback, handler)
         startCapture()
@@ -379,37 +410,27 @@ class MainActivity : Activity() {
             setPadding(0, dp(2), 0, 0)
             text = ""
         }
-        mainLayout.addView(statusText)
-
-        // Front control row: start/stop, mirrored with the panel
-        // (peak reset lives on the LED peak meter as a double-tap)
-        val frontCtrlRow = LinearLayout(this).apply {
+        // Run-state lamp (green = measuring, red = stopped) + status line.
+        // The front has no buttons (v1.21): tap = mode, double-tap = start/stop,
+        // long-press = settings; the buttons live in the settings panel.
+        runLamp = View(this).apply {
+            background = lampDrawable(false)
+        }
+        val statusRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(8), 0, 0)
+            gravity = Gravity.CENTER_VERTICAL
         }
-        frontStartButton = hwButton("測定開始", accent = true)
-        frontStartButton.setOnClickListener {
-            if (running) stopCapture() else startCapture()
+        val lampLp = LinearLayout.LayoutParams(dp(12), dp(12)).apply {
+            setMargins(dp(1), dp(2), dp(6), 0)
         }
-        frontCtrlRow.addView(frontStartButton, LinearLayout.LayoutParams(0, dp(46), 1f))
-        mainLayout.addView(frontCtrlRow)
+        statusRow.addView(runLamp, lampLp)
+        statusRow.addView(
+            statusText,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        mainLayout.addView(statusRow)
 
-        // Front mode toggle (one-touch VU <-> loudness)
-        frontModeButton = hwButton("● VU メーター　⇔　ラウドネス")
-        frontModeButton.setOnClickListener {
-            displayMode = if (displayMode == MeterView.DisplayMode.VU) {
-                MeterView.DisplayMode.LOUDNESS
-            } else {
-                MeterView.DisplayMode.VU
-            }
-            syncDisplayMode()
-        }
-        val frontModeLp = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(46)
-        ).apply { setMargins(0, dp(8), 0, 0) }
-        mainLayout.addView(frontModeButton, frontModeLp)
-
-        // Attach 700ms long-press handler to the main screen (single tap does nothing)
+        // Attach the front gesture handler: tap / double-tap / 700 ms long-press
         val longPressTouchListener = View.OnTouchListener { _, event ->
             handleMainTouch(event)
             true
@@ -450,7 +471,9 @@ class MainActivity : Activity() {
                     if (ledTapSwallowed) return@OnTouchListener true
                 }
             }
-            handleMainTouch(event)
+            // The LED meter keeps its own gestures (double-tap = reset);
+            // face tap gestures are disabled here, long-press still works.
+            handleMainTouch(event, allowTapGestures = false)
             true
         }
         mainLayout.setOnTouchListener(longPressTouchListener)
@@ -497,6 +520,7 @@ class MainActivity : Activity() {
         setRefLabels()
         syncDisplayMode()
         syncHoldButton()
+        syncRunLamp()
         updateToneButton()
         syncEngineButtons()
         syncDeviceButtons()
@@ -505,12 +529,20 @@ class MainActivity : Activity() {
         rootFrame.requestApplyInsets()
     }
 
-    private fun handleMainTouch(event: MotionEvent) {
+    private fun handleMainTouch(event: MotionEvent, allowTapGestures: Boolean = true) {
         if (settingsShown) return
         val rawX = event.rawX
         val rawY = event.rawY
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                if (allowTapGestures) {
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val dx = rawX - lastTapX
+                    val dy = rawY - lastTapY
+                    doubleTapPress = lastTapUpMs > 0L && now - lastTapUpMs < 330 &&
+                        dx * dx + dy * dy < dpF(48f) * dpF(48f)
+                    if (doubleTapPress) handler.removeCallbacks(singleTapAction)
+                }
                 pressActive = true
                 pressDownX = rawX
                 pressDownY = rawY
@@ -529,7 +561,23 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_UP -> {
+                val wasPressActive = pressActive
+                cancelLongPress()
+                if (allowTapGestures && wasPressActive) {
+                    if (doubleTapPress) {
+                        doubleTapPress = false
+                        lastTapUpMs = 0L
+                        if (running) stopCapture() else startCapture()
+                    } else {
+                        lastTapUpMs = android.os.SystemClock.elapsedRealtime()
+                        lastTapX = rawX
+                        lastTapY = rawY
+                        handler.removeCallbacks(singleTapAction)
+                        handler.postDelayed(singleTapAction, 330)
+                    }
+                }
+            }
             MotionEvent.ACTION_CANCEL,
             MotionEvent.ACTION_POINTER_DOWN -> {
                 cancelLongPress()
@@ -553,9 +601,19 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun lampDrawable(on: Boolean): android.graphics.drawable.GradientDrawable =
+        android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL
+            setColor(if (on) Color.rgb(74, 200, 110) else Color.rgb(240, 70, 58))
+        }
+
+    private fun syncRunLamp() {
+        if (::runLamp.isInitialized) runLamp.background = lampDrawable(running)
+    }
+
     private fun setStartButtons(label: String) {
         if (::startButton.isInitialized) startButton.text = label
-        if (::frontStartButton.isInitialized) frontStartButton.text = label
+        syncRunLamp()
     }
 
     private fun updateSettingsStateText() {
@@ -599,12 +657,6 @@ class MainActivity : Activity() {
                 if (active) Color.rgb(242, 201, 110) else Color.rgb(225, 225, 232)
             )
             b.text = (if (active) "● " else "   ") + LOUDNESS_PRESETS[i].displayLabel
-        }
-        if (::frontModeButton.isInitialized) {
-            val isVu = displayMode == MeterView.DisplayMode.VU
-            frontModeButton.text =
-                if (isVu) "● VU メーター　⇔　ラウドネス" else "VU メーター　⇔　● ラウドネス"
-            frontModeButton.setTextColor(Color.rgb(235, 235, 240))
         }
         if (::meterAvg.isInitialized && ::meterRow.isInitialized) {
             applyOrientation(resources.configuration.orientation)
@@ -778,6 +830,33 @@ class MainActivity : Activity() {
             ).apply { setMargins(0, dp(4), 0, 0) }
             container.addView(b, lp)
         }
+
+        // 6. Operation manual
+        container.addView(sectionHeader("操作マニュアル"))
+        val manualText = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.rgb(205, 205, 214))
+            setLineSpacing(dp(3).toFloat(), 1.0f)
+            setPadding(0, dp(4), 0, dp(8))
+            text = """
+                【メイン画面】
+                タップ … VU ⇔ ラウドネスの切り替え
+                ダブルタップ … 測定の開始／停止
+                長押し（0.7秒）… 設定画面を開く
+                LEDピークメーターをダブルタップ … ピーク／Integrated のリセット
+                LEDメーター下の HOLD … ピークホールド表示のオン／オフ
+                ランプ … 緑＝測定中、赤＝停止中
+
+                【設定画面から戻る】
+                戻るボタン／戻るジェスチャー、または「メーターへ戻る」
+
+                【表示の見方】
+                VU … 0 VU が基準レベル（既定 −18 dBFS）
+                ラウドネス … 細針＝ショートターム（3秒）、太針＝Integrated、0 LU が選択中の基準値
+                数値 … ピークはトゥルーピーク（dBTP）、LOUDNESS は M／S／I（LUFS）
+            """.trimIndent()
+        }
+        container.addView(manualText)
 
         settingsOverlay.addView(container)
     }
