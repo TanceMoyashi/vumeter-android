@@ -15,6 +15,8 @@ import kotlin.math.tan
  *    short-term (3 s) and gated integrated loudness.
  *  - Phase correlation between L and R over a 1 s window.
  *  - Sample peak with hold, and clip latching.
+ *  - True peak in the spirit of ITU-R BS.1770: 4x oversampling with a
+ *    windowed-sinc interpolator, read in dBTP, with its own hold.
  */
 class VuEngine(private val sampleRate: Int) {
 
@@ -39,6 +41,52 @@ class VuEngine(private val sampleRate: Int) {
     val peakLin = DoubleArray(2)
     private val peakAgeSec = DoubleArray(2) { 99.0 }
     val instPeakDbfs = DoubleArray(2) { -60.0 }
+
+    // ---- True-peak state (4x oversampled)
+    val tpPeakLin = DoubleArray(2)
+    private val tpPeakAgeSec = DoubleArray(2) { 99.0 }
+    val tpInstDbfs = DoubleArray(2) { -60.0 }
+
+    /** Per-channel sample history for the interpolator (oldest first). */
+    private val tpHist = Array(2) { DoubleArray(8) }
+
+    /**
+     * Windowed-sinc coefficients for the three fractional phases
+     * (1/4, 2/4, 3/4) between the last two samples, 8 taps each,
+     * normalised to unity DC gain.
+     */
+    private val tpCoefs: Array<DoubleArray> = Array(3) { phase ->
+        val d = (phase + 1) / 4.0
+        val coefs = DoubleArray(8)
+        var sum = 0.0
+        for (i in 0 until 8) {
+            val u = 6.0 + d - i
+            val sinc = if (kotlin.math.abs(u) < 1e-9) 1.0
+            else Math.sin(Math.PI * u) / (Math.PI * u)
+            val win = 0.5 + 0.5 * Math.cos(Math.PI * u / 7.0)
+            coefs[i] = sinc * win
+            sum += coefs[i]
+        }
+        for (i in 0 until 8) coefs[i] /= sum
+        coefs
+    }
+
+    /** Push a sample into the history and return the interpolated peak
+     *  between the previous and the current sample (linear, >= 0). */
+    private fun tpPush(chIdx: Int, x: Double): Double {
+        val h = tpHist[chIdx]
+        System.arraycopy(h, 1, h, 0, 7)
+        h[7] = x
+        var peak = 0.0
+        for (p in 0 until 3) {
+            val c = tpCoefs[p]
+            var acc = 0.0
+            for (i in 0 until 8) acc += c[i] * h[i]
+            val a = if (acc < 0) -acc else acc
+            if (a > peak) peak = a
+        }
+        return peak
+    }
 
     @Volatile
     var clip = BooleanArray(2)
@@ -119,6 +167,10 @@ class VuEngine(private val sampleRate: Int) {
         peakLin[1] = 0.0
         peakAgeSec[0] = 99.0
         peakAgeSec[1] = 99.0
+        tpPeakLin[0] = 0.0
+        tpPeakLin[1] = 0.0
+        tpPeakAgeSec[0] = 99.0
+        tpPeakAgeSec[1] = 99.0
         clip[0] = false
         clip[1] = false
     }
@@ -140,10 +192,14 @@ class VuEngine(private val sampleRate: Int) {
         val damp = 2.0 * ZETA * OMEGA
         var blockPeak0 = 0.0
         var blockPeak1 = 0.0
+        var blockTp0 = 0.0
+        var blockTp1 = 0.0
         for (f in 0 until frames) {
             val x0 = buf[f * ch].toDouble()
             val a0 = if (x0 < 0) -x0 else x0
             if (a0 > blockPeak0) blockPeak0 = a0
+            val tp0 = tpPush(0, x0)
+            if (tp0 > blockTp0) blockTp0 = tp0
             val acc0 = w2 * (a0 - y[0]) - damp * v[0]
             v[0] += acc0 * dt
             y[0] += v[0] * dt
@@ -157,6 +213,8 @@ class VuEngine(private val sampleRate: Int) {
                 x1 = buf[f * ch + 1].toDouble()
                 val a1 = if (x1 < 0) -x1 else x1
                 if (a1 > blockPeak1) blockPeak1 = a1
+                val tp1 = tpPush(1, x1)
+                if (tp1 > blockTp1) blockTp1 = tp1
                 val acc1 = w2 * (a1 - y[1]) - damp * v[1]
                 v[1] += acc1 * dt
                 y[1] += v[1] * dt
@@ -175,11 +233,20 @@ class VuEngine(private val sampleRate: Int) {
         if (ch == 1) {
             y[1] = y[0]
             blockPeak1 = blockPeak0
+            blockTp1 = blockTp0
         }
+        // True peak of the block: the greater of the sample peak and the
+        // interpolated (inter-sample) peak.
+        if (blockPeak0 > blockTp0) blockTp0 = blockPeak0
+        if (blockPeak1 > blockTp1) blockTp1 = blockPeak1
         instPeakDbfs[0] = toDbfs(blockPeak0)
         instPeakDbfs[1] = toDbfs(blockPeak1)
+        tpInstDbfs[0] = toDbfs(blockTp0)
+        tpInstDbfs[1] = toDbfs(blockTp1)
         updatePeak(0, blockPeak0, frames)
         updatePeak(1, blockPeak1, frames)
+        updateHold(tpPeakLin, tpPeakAgeSec, 0, blockTp0, frames)
+        updateHold(tpPeakLin, tpPeakAgeSec, 1, blockTp1, frames)
         if (blockPeak0 >= 0.999) clip[0] = true
         if (blockPeak1 >= 0.999) clip[1] = true
     }
@@ -203,16 +270,22 @@ class VuEngine(private val sampleRate: Int) {
     }
 
     private fun updatePeak(chIdx: Int, blockPeak: Double, frames: Int) {
+        updateHold(peakLin, peakAgeSec, chIdx, blockPeak, frames)
+    }
+
+    /** Peak hold: 1.5 s hold, then a fall of 20 dB per second. */
+    private fun updateHold(
+        lin: DoubleArray, age: DoubleArray, chIdx: Int, blockPeak: Double, frames: Int
+    ) {
         val blockSec = frames * dt
-        if (blockPeak >= peakLin[chIdx]) {
-            peakLin[chIdx] = blockPeak
-            peakAgeSec[chIdx] = 0.0
+        if (blockPeak >= lin[chIdx]) {
+            lin[chIdx] = blockPeak
+            age[chIdx] = 0.0
         } else {
-            peakAgeSec[chIdx] += blockSec
-            if (peakAgeSec[chIdx] > 1.5) {
-                // Fall at 20 dB per second after a 1.5 s hold.
-                peakLin[chIdx] *= 10.0.pow(-blockSec)
-                if (peakLin[chIdx] < 0.0001) peakLin[chIdx] = 0.0
+            age[chIdx] += blockSec
+            if (age[chIdx] > 1.5) {
+                lin[chIdx] *= 10.0.pow(-blockSec)
+                if (lin[chIdx] < 0.0001) lin[chIdx] = 0.0
             }
         }
     }
@@ -229,6 +302,9 @@ class VuEngine(private val sampleRate: Int) {
     }
 
     fun peakDbfs(chIdx: Int): Double = toDbfs(peakLin[chIdx])
+
+    /** Held true-peak level in dBTP. */
+    fun tpPeakDbfs(chIdx: Int): Double = toDbfs(tpPeakLin[chIdx])
 
     /**
      * Stereo average VU: the two channels' ballistic deflections are
@@ -264,17 +340,21 @@ class VuEngine(private val sampleRate: Int) {
     }
 
     /**
-     * Integrated loudness with BS.1770 gating: absolute gate at -70 LUFS,
-     * then a relative gate 10 LU below the ungated level.
-     * (Uses the 100 ms measurement blocks; the standard's 400 ms gating
-     * blocks with overlap are approximated by these blocks.)
+     * Integrated loudness with BS.1770 gating: 400 ms gating blocks with
+     * 75 % overlap (formed by averaging four consecutive 100 ms blocks,
+     * stepped by one block), followed by the two-stage gate — absolute gate
+     * at -70 LUFS, then a relative gate 10 LU below the stage-1 level.
      */
     fun integratedLufs(): Double {
-        val all: List<Double>
-        synchronized(blockZ) { all = blockZ.toList() }
-        if (all.size < 10) return Double.NaN
+        val raw: List<Double>
+        synchronized(blockZ) { raw = blockZ.toList() }
+        if (raw.size < 4) return Double.NaN
+        val blocks400 = ArrayList<Double>(raw.size - 3)
+        for (i in 0..(raw.size - 4)) {
+            blocks400.add((raw[i] + raw[i + 1] + raw[i + 2] + raw[i + 3]) / 4.0)
+        }
         val absGateZ = 10.0.pow((-70.0 - LOUDNESS_OFFSET) / 10.0)
-        val aboveAbs = all.filter { it > absGateZ }
+        val aboveAbs = blocks400.filter { it > absGateZ }
         if (aboveAbs.isEmpty()) return Double.NaN
         val stage1 = loudnessOf(aboveAbs.average())
         if (stage1.isNaN()) return Double.NaN

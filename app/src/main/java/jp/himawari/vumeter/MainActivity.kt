@@ -14,33 +14,76 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.RadioButton
-import android.widget.RadioGroup
-import android.widget.Spinner
+import android.widget.ScrollView
 import android.widget.TextView
 
 class MainActivity : Activity() {
 
     private data class InputOption(val label: String, val device: AudioDeviceInfo?)
 
+    data class LoudnessPreset(val name: String, val targetLufs: Double, val unit: String) {
+        val displayLabel: String
+            get() = "$name（${targetLufs.toInt()} $unit）"
+        val dialTargetLabel: String
+            get() = "0 LU = ${targetLufs.toInt()} $unit（$name）"
+    }
+
+    companion object {
+        private const val LONG_PRESS_MS = 700L
+        private const val SLIDE_CANCEL_DP = 24f
+
+        val LOUDNESS_PRESETS = listOf(
+            LoudnessPreset("ARIB TR-B32（日本・放送）", -24.0, "LKFS"),
+            LoudnessPreset("EBU R 128（欧州・放送）", -23.0, "LUFS"),
+            LoudnessPreset("ATSC A/85（米国・放送）", -24.0, "LKFS"),
+            LoudnessPreset("ライブ・PA（目安）", -18.0, "LUFS"),
+            LoudnessPreset("YouTube", -14.0, "LUFS"),
+            LoudnessPreset("Spotify", -14.0, "LUFS"),
+            LoudnessPreset("Amazon Music", -14.0, "LUFS"),
+            LoudnessPreset("Apple Music", -16.0, "LUFS"),
+            LoudnessPreset("Netflix", -27.0, "LUFS")
+        )
+    }
+
     private lateinit var audioManager: AudioManager
     private lateinit var meterAvg: MeterView
     private lateinit var meterRow: LinearLayout
     private lateinit var meterL: MeterView
     private lateinit var meterR: MeterView
-    private lateinit var peakBar: PeakBarView
-    private lateinit var deviceSpinner: Spinner
+    private lateinit var ledMeter: VerticalLedMeterView
     private lateinit var statusText: TextView
-    private lateinit var valueText: TextView
-    private lateinit var overL: TextView
-    private lateinit var overR: TextView
+    private lateinit var bigPeakText: TextView
+    private lateinit var infoText: TextView
     private lateinit var startButton: Button
+    private lateinit var leverSwitch: LeverSwitchView
+    private lateinit var stageView: LinearLayout
+    private lateinit var stageTop: LinearLayout
+    private lateinit var meterAreaView: LinearLayout
+    private lateinit var rootFrame: FrameLayout
+    private lateinit var rootMain: LinearLayout
+    private lateinit var longPressRing: LongPressRingView
+    private lateinit var settingsOverlay: ScrollView
+    private var settingsShown = false
+
+    private lateinit var modeVuButton: Button
+    private lateinit var modeLoudnessButton: Button
+    private val presetButtons = mutableListOf<Button>()
+    private var selectedPresetIndex = 0
+    private var displayMode: MeterView.DisplayMode = MeterView.DisplayMode.VU
+
+    private lateinit var toneButton: Button
+    private val toneModeButtons = mutableMapOf<TonePlayer.Mode, Button>()
+    private lateinit var deviceButton: Button
+    private lateinit var engineButton: Button
+    private lateinit var resetButton: Button
+    private lateinit var refreshButton: Button
+    private var selectedDeviceIndex = 0
 
     private var options: List<InputOption> = emptyList()
     private var engine: VuEngine? = null
@@ -53,15 +96,37 @@ class MainActivity : Activity() {
     private var channels = 2
     private var referenceDbfs = -18.0
 
-    private lateinit var loudnessText: TextView
-    private lateinit var corrView: CorrelationView
-    private lateinit var corrText: TextView
-    private lateinit var toneButton: Button
     private lateinit var logButton: Button
     private val tonePlayer = TonePlayer()
     private var csvLogger: CsvLogger? = null
     private var logging = false
     private var captureStartMs = 0L
+
+    /** Long-press state for opening the settings panel (700 ms hold). */
+    private var pressActive = false
+    private var pressDownX = 0f
+    private var pressDownY = 0f
+    private var pressStartMs = 0L
+    private val longPressTick = object : Runnable {
+        override fun run() {
+            if (!pressActive || settingsShown) return
+            val elapsed = android.os.SystemClock.elapsedRealtime() - pressStartMs
+            val progress = (elapsed.toFloat() / LONG_PRESS_MS.toFloat()).coerceIn(0f, 1f)
+            longPressRing.update(pressDownX, pressDownY, progress)
+            if (elapsed >= LONG_PRESS_MS) {
+                pressActive = false
+                longPressRing.hide()
+                showSettings()
+            } else {
+                handler.postDelayed(this, 16)
+            }
+        }
+    }
+
+    /** LED-meter display levels with the IEC 60268-18 style return
+     *  (20 dB fall in 1.7 s, about 11.8 dB/s). */
+    private val dispTp = doubleArrayOf(-60.0, -60.0)
+    private var lastTickMs = 0L
 
     private val handler = Handler(Looper.getMainLooper())
     private var tickCount = 0
@@ -72,24 +137,48 @@ class MainActivity : Activity() {
                 meterAvg.setLevel(e.vuAverage())
                 meterL.setLevel(e.vu(0))
                 meterR.setLevel(e.vu(1))
-                peakBar.setPeaks(
-                    e.instPeakDbfs[0], e.instPeakDbfs[1],
-                    e.peakDbfs(0), e.peakDbfs(1)
+
+                val target = currentPreset().targetLufs
+                val sLufs = e.shortTermLufs()
+                val iLufs = e.integratedLufs()
+                val sLu = if (sLufs.isNaN()) Double.NaN else sLufs - target
+                val iLu = if (iLufs.isNaN()) Double.NaN else iLufs - target
+                meterAvg.setLoudnessLevels(sLu, iLu)
+                meterL.setLoudnessLevels(sLu, iLu)
+                meterR.setLoudnessLevels(sLu, iLu)
+
+                meterAvg.peakLamp = e.clip[0] || e.clip[1]
+                meterL.peakLamp = e.clip[0]
+                meterR.peakLamp = e.clip[1]
+                val now = android.os.SystemClock.elapsedRealtime()
+                val dt = if (lastTickMs == 0L) 0.033
+                    else ((now - lastTickMs) / 1000.0).coerceIn(0.005, 0.25)
+                lastTickMs = now
+                for (ch in 0..1) {
+                    val inst = e.tpInstDbfs[ch]
+                    val decayed = dispTp[ch] - 11.76 * dt
+                    dispTp[ch] = if (inst > decayed) inst else decayed
+                }
+                ledMeter.setPeaks(
+                    dispTp[0], dispTp[1],
+                    e.tpPeakDbfs(0), e.tpPeakDbfs(1)
                 )
-                overL.setBackgroundColor(if (e.clip[0]) Color.rgb(224, 49, 49) else Color.rgb(52, 40, 40))
-                overR.setBackgroundColor(if (e.clip[1]) Color.rgb(224, 49, 49) else Color.rgb(52, 40, 40))
-                corrView.setCorrelation(e.correlation())
                 tickCount++
                 if (tickCount % 5 == 0) {
-                    valueText.text = String.format(
-                        "L  %6.1f VU   peak %6.1f dBFS\nR  %6.1f VU   peak %6.1f dBFS",
-                        e.vu(0), e.peakDbfs(0), e.vu(1), e.peakDbfs(1)
+                    bigPeakText.text = String.format(
+                        java.util.Locale.US,
+                        "L %6.1f dBTP    R %6.1f dBTP",
+                        e.tpPeakDbfs(0), e.tpPeakDbfs(1)
                     )
-                    loudnessText.text = "LOUDNESS   M " + fmtLufs(e.momentaryLufs()) +
-                        "   S " + fmtLufs(e.shortTermLufs()) +
-                        "   I " + fmtLufs(e.integratedLufs()) + " LUFS"
                     val c = e.correlation()
-                    corrText.text = if (c.isNaN()) "相関  ---" else String.format("相関 %+.2f", c)
+                    infoText.text = String.format(
+                        java.util.Locale.US,
+                        "VU   L %6.1f   R %6.1f\nLOUDNESS  M %s  S %s  I %s LUFS    相関 %s",
+                        e.vu(0), e.vu(1),
+                        fmtLufs(e.momentaryLufs()), fmtLufs(sLufs),
+                        fmtLufs(iLufs),
+                        if (c.isNaN()) " ---" else String.format(java.util.Locale.US, "%+.2f", c)
+                    )
                 }
                 if (logging && tickCount % 6 == 0) {
                     writeLogRow(e)
@@ -110,9 +199,11 @@ class MainActivity : Activity() {
         buildUi()
         refreshDevices()
         audioManager.registerAudioDeviceCallback(deviceCallback, handler)
+        startCapture()
     }
 
     override fun onDestroy() {
+        cancelLongPress()
         stopCapture()
         tonePlayer.stop()
         csvLogger?.stop()
@@ -121,226 +212,197 @@ class MainActivity : Activity() {
     }
 
     private fun dp(x: Int): Int = (x * resources.displayMetrics.density).toInt()
+    private fun dpF(x: Float): Float = x * resources.displayMetrics.density
+
+    private fun currentPreset(): LoudnessPreset =
+        LOUDNESS_PRESETS[selectedPresetIndex.coerceIn(0, LOUDNESS_PRESETS.lastIndex)]
 
     private fun buildUi() {
-        val root = LinearLayout(this).apply {
+        rootFrame = FrameLayout(this).apply {
+            setBackgroundColor(Color.rgb(13, 13, 16))
+        }
+
+        // Main screen: ONLY the meters and the independent dBTP peak display.
+        // No app title, no instructions, and no settings controls on the main screen.
+        val mainLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(16, 16, 20))
-            setPadding(dp(14), dp(14), dp(14), dp(14))
+            setBackgroundColor(Color.rgb(13, 13, 16))
+            setPadding(dp(10), dp(8), dp(10), dp(8))
         }
-
-        val title = TextView(this).apply {
-            text = "VU METER"
-            textSize = 20f
-            setTextColor(Color.rgb(240, 240, 245))
-            setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
+        mainLayout.setOnApplyWindowInsetsListener { v, insets ->
+            val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars())
+            v.setPadding(
+                dp(10) + bars.left, dp(8) + bars.top,
+                dp(10) + bars.right, dp(8) + bars.bottom
+            )
+            insets
         }
-        root.addView(title)
+        rootMain = mainLayout
 
+        stageView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.rgb(22, 22, 27))
+                cornerRadius = dp(14).toFloat()
+                setStroke(dp(1), Color.rgb(48, 48, 56))
+            }
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+        stageTop = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        meterAreaView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+        }
         meterAvg = MeterView(this).apply {
             channelLabel = "L+R"
         }
-        root.addView(
+        meterAreaView.addView(
             meterAvg,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+                LinearLayout.LayoutParams.MATCH_PARENT
             )
         )
-
         meterRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
         }
         meterL = MeterView(this).apply {
             channelLabel = "L"
         }
         meterR = MeterView(this).apply {
             channelLabel = "R"
-            needleColor = Color.rgb(192, 39, 45)
+            needleColor = Color.rgb(22, 22, 24)
         }
         meterRow.addView(
             meterL,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
         )
         meterRow.addView(
             meterR,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
         )
-        root.addView(meterRow)
-
-        peakBar = PeakBarView(this)
-        root.addView(
-            peakBar,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52))
-        )
-
-        val infoRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        valueText = TextView(this).apply {
-            textSize = 14f
-            setTextColor(Color.rgb(220, 220, 228))
-            typeface = android.graphics.Typeface.MONOSPACE
-            text = "L    --- VU   peak   --- dBFS\nR    --- VU   peak   --- dBFS"
-        }
-        infoRow.addView(valueText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        overL = overLamp("OVER L")
-        overR = overLamp("OVER R")
-        infoRow.addView(overL)
-        infoRow.addView(overR)
-        root.addView(infoRow)
-
-        loudnessText = TextView(this).apply {
-            textSize = 13f
-            setTextColor(Color.rgb(220, 220, 228))
-            typeface = android.graphics.Typeface.MONOSPACE
-            setPadding(0, dp(6), 0, 0)
-            text = "LOUDNESS   M  --.-   S  --.-   I  --.- LUFS"
-        }
-        root.addView(loudnessText)
-
-        val corrRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4), 0, 0)
-        }
-        corrText = TextView(this).apply {
-            textSize = 13f
-            setTextColor(Color.rgb(220, 220, 228))
-            typeface = android.graphics.Typeface.MONOSPACE
-            text = "相関  ---"
-        }
-        corrRow.addView(corrText, LinearLayout.LayoutParams(dp(84), LinearLayout.LayoutParams.WRAP_CONTENT))
-        corrView = CorrelationView(this)
-        corrRow.addView(corrView, LinearLayout.LayoutParams(0, dp(30), 1f))
-        root.addView(corrRow)
-
-        // Input device selection
-        val deviceLabel = sectionLabel("入力デバイス")
-        root.addView(deviceLabel)
-        val deviceRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        deviceSpinner = Spinner(this)
-        deviceSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (running) startCapture()
-            }
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
-        }
-        deviceRow.addView(deviceSpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        val refreshButton = Button(this).apply { text = "再読込" }
-        refreshButton.setOnClickListener { refreshDevices() }
-        deviceRow.addView(refreshButton)
-        root.addView(deviceRow)
-
-        // Capture engine selection: AudioRecord (Java API) or AAudio (native, low latency)
-        root.addView(sectionLabel("録音エンジン"))
-        val engineGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
-        val rbAudioRecord = RadioButton(this).apply {
-            text = "AudioRecord"
-            textSize = 15f
-            setTextColor(Color.rgb(230, 230, 235))
-        }
-        val rbAAudio = RadioButton(this).apply {
-            text = "AAudio"
-            textSize = 15f
-            setTextColor(Color.rgb(230, 230, 235))
-        }
-        engineGroup.addView(rbAudioRecord)
-        engineGroup.addView(rbAAudio)
-        engineGroup.check(rbAudioRecord.id)
-        engineGroup.setOnCheckedChangeListener { _, checkedId ->
-            useAAudio = checkedId == rbAAudio.id
-            if (running) startCapture()
-        }
-        root.addView(engineGroup)
-
-        // Reference level selection
-        root.addView(sectionLabel("基準レベル（0 VU）"))
-        val refGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
-        val refValues = listOf(-24.0, -20.0, -18.0, -16.0, -14.0)
-        for (value in refValues) {
-            val rb = RadioButton(this).apply {
-                text = "${value.toInt()}"
-                textSize = 15f
-                setTextColor(Color.rgb(230, 230, 235))
-                tag = value
-            }
-            refGroup.addView(rb)
-            if (value == referenceDbfs) refGroup.check(rb.id)
-        }
-        refGroup.setOnCheckedChangeListener { group, checkedId ->
-            val rb = group.findViewById<RadioButton>(checkedId)
-            val v = rb.tag as Double
-            referenceDbfs = v
-            engine?.referenceDbfs = v
-            tonePlayer.levelDbfs = v
-            setRefLabels()
-        }
-        root.addView(refGroup)
-        val unitLabel = TextView(this).apply {
-            text = "単位: dBFS"
-            textSize = 11f
-            setTextColor(Color.rgb(150, 150, 158))
-        }
-        root.addView(unitLabel)
-
-        // Buttons
-        val buttonRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(8), 0, 0)
-        }
-        startButton = Button(this).apply { text = "測定開始" }
-        startButton.setOnClickListener {
-            if (running) stopCapture() else startCapture()
-        }
-        buttonRow.addView(startButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        toneButton = Button(this).apply { text = "トーン OFF" }
-        toneButton.setOnClickListener { toggleTone() }
-        buttonRow.addView(toneButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(buttonRow)
-
-        val buttonRow2 = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        val resetButton = Button(this).apply { text = "ピークリセット" }
-        resetButton.setOnClickListener {
-            engine?.resetPeak()
-            engine?.resetLoudness()
-        }
-        buttonRow2.addView(resetButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        logButton = Button(this).apply { text = "ログ開始" }
-        logButton.setOnClickListener { toggleLog() }
-        buttonRow2.addView(logButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(buttonRow2)
-
-        statusText = TextView(this).apply {
-            textSize = 12f
-            setTextColor(Color.rgb(160, 160, 168))
-            setPadding(0, dp(8), 0, 0)
-            text = "入力を選んで「測定開始」を押してください"
-        }
-        root.addView(statusText)
-
-        val note = TextView(this).apply {
-            textSize = 11f
-            setTextColor(Color.rgb(110, 110, 118))
-            setPadding(0, dp(4), 0, 0)
-            text = "注: 本体マイクは端末側の音声処理の影響を受けるため、レベル精度が必要な測定にはUSBオーディオI/Fの使用を推奨します。ラウドネスはITU-R BS.1770方式（ゲーティングは100msブロックによる近似）です。「ピークリセット」はラウドネスの積算もリセットします。"
-        }
-        root.addView(note)
-
-        setRefLabels()
-        applyOrientation(resources.configuration.orientation)
-        val scroll = android.widget.ScrollView(this)
-        scroll.addView(
-            root,
-            android.view.ViewGroup.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+        meterAreaView.addView(
+            meterRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT
             )
         )
-        setContentView(scroll)
+        stageTop.addView(
+            meterAreaView,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+        )
+        // Slim vertical LED true-peak meter (dBTP) to the right of the meters
+        ledMeter = VerticalLedMeterView(this)
+        ledMeter.referenceDbfs = referenceDbfs
+        val ledLp = LinearLayout.LayoutParams(dp(46), LinearLayout.LayoutParams.MATCH_PARENT)
+        ledLp.setMargins(dp(5), 0, 0, 0)
+        stageTop.addView(ledMeter, ledLp)
+
+        stageView.addView(
+            stageTop,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        )
+        mainLayout.addView(
+            stageView,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        )
+
+        // Attach 700ms long-press handler to the main screen (single tap does nothing)
+        val longPressTouchListener = View.OnTouchListener { _, event ->
+            handleMainTouch(event)
+            true
+        }
+        mainLayout.setOnTouchListener(longPressTouchListener)
+        stageView.setOnTouchListener(longPressTouchListener)
+        meterAvg.setOnTouchListener(longPressTouchListener)
+        meterL.setOnTouchListener(longPressTouchListener)
+        meterR.setOnTouchListener(longPressTouchListener)
+        ledMeter.setOnTouchListener(longPressTouchListener)
+
+        rootFrame.addView(
+            mainLayout,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        // Circular progress ring overlay for 700ms long-press
+        longPressRing = LongPressRingView(this).apply {
+            visibility = View.GONE
+        }
+        rootFrame.addView(
+            longPressRing,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        // Settings panel overlay (opened only via 700ms long-press)
+        buildSettingsPanel()
+        rootFrame.addView(
+            settingsOverlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        setRefLabels()
+        syncDisplayMode()
+        updateToneButton()
+        syncEngineButtons()
+        syncDeviceButtons()
+        applyOrientation(resources.configuration.orientation)
+        setContentView(rootFrame)
+        rootFrame.requestApplyInsets()
+    }
+
+    private fun handleMainTouch(event: MotionEvent) {
+        if (settingsShown) return
+        val rawX = event.rawX
+        val rawY = event.rawY
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                pressActive = true
+                pressDownX = rawX
+                pressDownY = rawY
+                pressStartMs = android.os.SystemClock.elapsedRealtime()
+                longPressRing.update(pressDownX, pressDownY, 0.01f)
+                handler.removeCallbacks(longPressTick)
+                handler.postDelayed(longPressTick, 16)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (pressActive) {
+                    val dx = rawX - pressDownX
+                    val dy = rawY - pressDownY
+                    val limit = dpF(SLIDE_CANCEL_DP)
+                    if (dx * dx + dy * dy > limit * limit) {
+                        cancelLongPress()
+                    }
+                }
+            }
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_CANCEL,
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                cancelLongPress()
+            }
+        }
+    }
+
+    private fun cancelLongPress() {
+        pressActive = false
+        handler.removeCallbacks(longPressTick)
+        if (::longPressRing.isInitialized) {
+            longPressRing.hide()
+        }
     }
 
     private fun setRefLabels() {
@@ -348,17 +410,263 @@ class MainActivity : Activity() {
         meterAvg.refLabel = label
         meterL.refLabel = label
         meterR.refLabel = label
+        if (::ledMeter.isInitialized) ledMeter.referenceDbfs = referenceDbfs
+        if (::leverSwitch.isInitialized) leverSwitch.value = referenceDbfs
     }
 
-    /** Portrait: one meter with the stereo average. Landscape: two meters. */
-    private fun applyOrientation(orientation: Int) {
-        if (orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
-            meterAvg.visibility = View.GONE
-            meterRow.visibility = View.VISIBLE
-        } else {
-            meterAvg.visibility = View.VISIBLE
-            meterRow.visibility = View.GONE
+    private fun syncDisplayMode() {
+        val targetLabel = currentPreset().dialTargetLabel
+        for (m in listOf(meterAvg, meterL, meterR)) {
+            m.displayMode = displayMode
+            m.loudnessTargetLabel = targetLabel
         }
+        if (::modeVuButton.isInitialized && ::modeLoudnessButton.isInitialized) {
+            val isVu = displayMode == MeterView.DisplayMode.VU
+            modeVuButton.setTextColor(
+                if (isVu) Color.rgb(242, 201, 110) else Color.rgb(220, 220, 228)
+            )
+            modeVuButton.text = (if (isVu) "● " else "") + "VU メーター"
+            modeLoudnessButton.setTextColor(
+                if (!isVu) Color.rgb(242, 201, 110) else Color.rgb(220, 220, 228)
+            )
+            modeLoudnessButton.text = (if (!isVu) "● " else "") + "ラウドネス (LUFS / I)"
+        }
+        for (i in presetButtons.indices) {
+            val active = i == selectedPresetIndex
+            val b = presetButtons[i]
+            b.setTextColor(
+                if (active) Color.rgb(242, 201, 110) else Color.rgb(225, 225, 232)
+            )
+            b.text = (if (active) "● " else "   ") + LOUDNESS_PRESETS[i].displayLabel
+        }
+        if (::meterAvg.isInitialized && ::meterRow.isInitialized) {
+            applyOrientation(resources.configuration.orientation)
+        }
+    }
+
+    /**
+     * Settings panel opened by a 700 ms long-press on the meter screen.
+     * Tap the return button or background area to return to full-screen meter.
+     */
+    private fun buildSettingsPanel() {
+        settingsOverlay = ScrollView(this).apply {
+            setBackgroundColor(Color.argb(242, 13, 13, 16))
+            visibility = View.GONE
+            isFillViewport = true
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(24))
+            // Tapping empty space on the settings panel returns to the meter screen
+            setOnClickListener { hideSettings() }
+        }
+        settingsOverlay.setOnApplyWindowInsetsListener { v, insets ->
+            val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars())
+            container.setPadding(
+                dp(16) + bars.left, dp(14) + bars.top,
+                dp(16) + bars.right, dp(24) + bars.bottom
+            )
+            insets
+        }
+
+        // Top row: Tap to return to full-screen meter + Start/Stop + Peak/Loudness Reset
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val closeButton = hwButton("← メーターへ戻る（タップで閉じる）", accent = true)
+        closeButton.setOnClickListener { hideSettings() }
+        topRow.addView(
+            closeButton,
+            LinearLayout.LayoutParams(0, dp(46), 1f)
+        )
+        container.addView(topRow)
+
+        // Measurement controls row (Start/Stop + Reset)
+        val ctrlRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val ctrlLp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins(0, dp(10), 0, 0) }
+
+        startButton = hwButton("測定開始", accent = true)
+        startButton.setOnClickListener {
+            if (running) stopCapture() else startCapture()
+        }
+        ctrlRow.addView(startButton, LinearLayout.LayoutParams(0, dp(46), 1f))
+
+        resetButton = hwButton("ピーク / Integrated リセット")
+        resetButton.setOnClickListener { resetPeaks() }
+        val resetLp = LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+            setMargins(dp(8), 0, 0, 0)
+        }
+        ctrlRow.addView(resetButton, resetLp)
+        container.addView(ctrlRow, ctrlLp)
+
+        fun sectionHeader(title: String): TextView = TextView(this).apply {
+            text = title
+            textSize = 13f
+            setTextColor(Color.rgb(190, 182, 164))
+            setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
+            setPadding(0, dp(16), 0, dp(6))
+        }
+
+        // 1. Display Mode Switch: VU <-> Loudness
+        container.addView(sectionHeader("表示モード切替（VU ⇔ ラウドネス）"))
+        val modeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        modeVuButton = hwButton("VU メーター")
+        modeVuButton.setOnClickListener {
+            displayMode = MeterView.DisplayMode.VU
+            syncDisplayMode()
+        }
+        modeLoudnessButton = hwButton("ラウドネス (LUFS / I)")
+        modeLoudnessButton.setOnClickListener {
+            displayMode = MeterView.DisplayMode.LOUDNESS
+            syncDisplayMode()
+        }
+        modeRow.addView(modeVuButton, LinearLayout.LayoutParams(0, dp(48), 1f))
+        val modeLoudLp = LinearLayout.LayoutParams(0, dp(48), 1f).apply {
+            setMargins(dp(8), 0, 0, 0)
+        }
+        modeRow.addView(modeLoudnessButton, modeLoudLp)
+        container.addView(modeRow)
+
+        // 2. Loudness Target Presets (9 presets)
+        container.addView(sectionHeader("ラウドネス基準値プリセット（0 LU ターゲット）"))
+        presetButtons.clear()
+        for (i in LOUDNESS_PRESETS.indices) {
+            val preset = LOUDNESS_PRESETS[i]
+            val b = hwButton(preset.displayLabel).apply {
+                gravity = Gravity.CENTER_VERTICAL or Gravity.START
+                setPadding(dp(14), 0, dp(14), 0)
+                setOnClickListener {
+                    selectedPresetIndex = i
+                    syncDisplayMode()
+                }
+            }
+            presetButtons.add(b)
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
+            ).apply { setMargins(0, dp(4), 0, 0) }
+            container.addView(b, lp)
+        }
+
+        // 3. VU Reference Level (0 VU = -24 .. -14 dBFS)
+        container.addView(sectionHeader("VU 基準レベル（0 VU = dBFS）"))
+        leverSwitch = LeverSwitchView(this).apply {
+            values = listOf(-24.0, -20.0, -18.0, -16.0, -14.0)
+            value = referenceDbfs
+            onSelected = { v -> onRefSelected(v) }
+        }
+        container.addView(
+            leverSwitch,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44))
+        )
+
+        // 4. Input Device, Audio Engine (AudioRecord / AAudio), CSV Log
+        container.addView(sectionHeader("入力デバイス・録音エンジン・ログ"))
+        fun settingRow(b: Button) {
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)
+            ).apply { setMargins(0, dp(6), 0, 0) }
+            b.gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            b.setPadding(dp(14), 0, dp(14), 0)
+            container.addView(b, lp)
+        }
+        deviceButton = hwButton("入力: 自動")
+        deviceButton.setOnClickListener { cycleDevice() }
+        settingRow(deviceButton)
+
+        refreshButton = hwButton("入力デバイス一覧を再読込")
+        refreshButton.setOnClickListener { refreshDevices() }
+        settingRow(refreshButton)
+
+        engineButton = hwButton("エンジン: AudioRecord")
+        engineButton.setOnClickListener { cycleEngine() }
+        settingRow(engineButton)
+
+        logButton = hwButton("CSVログ開始")
+        logButton.setOnClickListener { toggleLog() }
+        settingRow(logButton)
+
+        // 5. Test Tone Generator
+        container.addView(sectionHeader("テストトーン出力"))
+        toneButton = hwButton("トーン OFF")
+        toneModeButtons.clear()
+        for (mode in TonePlayer.Mode.values()) {
+            val b = hwButton(toneRowLabel(mode)).apply {
+                gravity = Gravity.CENTER_VERTICAL or Gravity.START
+                setPadding(dp(14), 0, dp(14), 0)
+                setOnClickListener { setToneMode(mode) }
+            }
+            toneModeButtons[mode] = b
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(44)
+            ).apply { setMargins(0, dp(4), 0, 0) }
+            container.addView(b, lp)
+        }
+
+        // Independent True Peak (dBTP) & measurement readout inside settings panel
+        bigPeakText = TextView(this).apply {
+            textSize = 18f
+            setTextColor(Color.rgb(238, 238, 244))
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(0, dp(16), 0, 0)
+            text = "L   --.- dBTP    R   --.- dBTP"
+        }
+        container.addView(bigPeakText)
+
+        infoText = TextView(this).apply {
+            textSize = 11.5f
+            setTextColor(Color.rgb(205, 205, 214))
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(0, dp(6), 0, 0)
+            text = "VU   L    ---   R    ---\nLOUDNESS  M  --.-  S  --.-  I  --.- LUFS    相関  ---"
+        }
+        container.addView(infoText)
+
+        statusText = TextView(this).apply {
+            textSize = 11f
+            setTextColor(Color.rgb(160, 160, 168))
+            setPadding(0, dp(6), 0, 0)
+            text = ""
+        }
+        container.addView(statusText)
+
+        settingsOverlay.addView(container)
+    }
+
+    private fun showSettings() {
+        settingsShown = true
+        settingsOverlay.visibility = View.VISIBLE
+        settingsOverlay.requestApplyInsets()
+    }
+
+    private fun hideSettings() {
+        settingsShown = false
+        settingsOverlay.visibility = View.GONE
+    }
+
+    override fun onBackPressed() {
+        if (settingsShown) hideSettings() else super.onBackPressed()
+    }
+
+    /**
+     * VU mode: Portrait shows one meter (L+R sum), Landscape shows two meters (L and R separate).
+     * Loudness mode: Always shows a single meter (meterAvg) regardless of orientation.
+     */
+    private fun applyOrientation(orientation: Int) {
+        val landscape =
+            orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        val showDual = landscape && displayMode == MeterView.DisplayMode.VU
+        meterAvg.visibility = if (showDual) View.GONE else View.VISIBLE
+        meterRow.visibility = if (showDual) View.VISIBLE else View.GONE
     }
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
@@ -366,25 +674,34 @@ class MainActivity : Activity() {
         applyOrientation(newConfig.orientation)
     }
 
-    private fun sectionLabel(text: String): TextView = TextView(this).apply {
-        this.text = text
-        textSize = 13f
-        setTextColor(Color.rgb(170, 170, 178))
-        setPadding(0, dp(10), 0, dp(2))
-    }
-
-    private fun overLamp(text: String): TextView = TextView(this).apply {
-        this.text = text
-        textSize = 11f
-        setTextColor(Color.WHITE)
-        gravity = Gravity.CENTER
-        setBackgroundColor(Color.rgb(52, 40, 40))
-        setPadding(dp(8), dp(4), dp(8), dp(4))
-        val lp = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        )
-        lp.setMargins(dp(4), 0, 0, 0)
-        layoutParams = lp
+    /** Dark metal button in the style of the meter chassis. */
+    private fun hwButton(label: String, accent: Boolean = false, compact: Boolean = false): Button {
+        val stroke = if (accent) Color.rgb(216, 164, 65) else Color.rgb(80, 80, 92)
+        fun face(top: Int, bottom: Int) =
+            android.graphics.drawable.GradientDrawable().apply {
+                orientation = android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM
+                setColors(intArrayOf(top, bottom))
+                cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), stroke)
+            }
+        val states = android.graphics.drawable.StateListDrawable().apply {
+            addState(
+                intArrayOf(android.R.attr.state_pressed),
+                face(Color.rgb(78, 78, 88), Color.rgb(60, 60, 68))
+            )
+            addState(intArrayOf(), face(Color.rgb(54, 54, 62), Color.rgb(37, 37, 43)))
+        }
+        return Button(this).apply {
+            setSingleLine(true)
+            text = label
+            textSize = if (compact) 11.5f else 13.5f
+            isAllCaps = false
+            setTextColor(
+                if (accent) Color.rgb(242, 201, 110) else Color.rgb(235, 235, 240)
+            )
+            background = states
+            setPadding(dp(if (compact) 7 else 14), dp(if (compact) 6 else 8), dp(if (compact) 7 else 14), dp(if (compact) 6 else 8))
+        }
     }
 
     private fun typeLabel(type: Int): String = when (type) {
@@ -398,32 +715,53 @@ class MainActivity : Activity() {
     }
 
     private fun refreshDevices() {
-        val selectedId = options.getOrNull(deviceSpinner.selectedItemPosition)?.device?.id
+        val selectedId = options.getOrNull(selectedDeviceIndex)?.device?.id
         val list = mutableListOf(InputOption("自動（既定の入力）", null))
+        val allowed = setOf(
+            AudioDeviceInfo.TYPE_BUILTIN_MIC,
+            AudioDeviceInfo.TYPE_USB_DEVICE,
+            AudioDeviceInfo.TYPE_USB_HEADSET,
+            AudioDeviceInfo.TYPE_USB_ACCESSORY
+        )
         val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-            .filter { it.isSource }
+            .filter { it.isSource && it.type in allowed }
+            .groupBy { d ->
+                if (d.type == AudioDeviceInfo.TYPE_BUILTIN_MIC) {
+                    "builtin:" + d.productName.toString()
+                } else {
+                    "usb:" + d.productName.toString() + "@" + (d.address ?: "")
+                }
+            }
+            .values
+            .map { group ->
+                group.maxWithOrNull(
+                    compareBy(
+                        { if (it.channelCounts?.contains(2) == true) 1 else 0 },
+                        { it.id }
+                    )
+                ) ?: group.first()
+            }
             .sortedWith(compareBy({ devicePriority(it.type) }, { it.productName.toString() }))
         for (d in devices) {
             val name = d.productName?.toString()?.ifBlank { "不明なデバイス" } ?: "不明なデバイス"
             list.add(InputOption("$name（${typeLabel(d.type)}）", d))
         }
         options = list
-        val adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_item,
-            list.map { it.label }
-        )
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        deviceSpinner.adapter = adapter
-        if (selectedId != null) {
+        selectedDeviceIndex = if (selectedId != null) {
             val idx = list.indexOfFirst { it.device?.id == selectedId }
-            if (idx >= 0) deviceSpinner.setSelection(idx)
+            if (idx >= 0) idx else 0
+        } else {
+            selectedDeviceIndex.coerceIn(0, maxOf(0, list.size - 1))
         }
+        syncDeviceButtons()
     }
+
+    private fun selectedOption(): InputOption? = options.getOrNull(selectedDeviceIndex)
 
     private fun devicePriority(type: Int): Int = when (type) {
         AudioDeviceInfo.TYPE_BUILTIN_MIC -> 0
-        AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET -> 1
+        AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET,
+        AudioDeviceInfo.TYPE_USB_ACCESSORY -> 1
         AudioDeviceInfo.TYPE_WIRED_HEADSET -> 2
         else -> 3
     }
@@ -434,6 +772,9 @@ class MainActivity : Activity() {
             return
         }
         stopCapture()
+        dispTp[0] = -60.0
+        dispTp[1] = -60.0
+        lastTickMs = 0L
         if (useAAudio && startCaptureAAudio()) {
             return
         }
@@ -441,7 +782,7 @@ class MainActivity : Activity() {
     }
 
     private fun startCaptureAAudio(): Boolean {
-        val option = options.getOrNull(deviceSpinner.selectedItemPosition)
+        val option = selectedOption()
         val cap = AAudioCapture()
         if (!cap.available) {
             statusText.text = "AAudioライブラリを読み込めなかったため、AudioRecordで開始します"
@@ -472,7 +813,7 @@ class MainActivity : Activity() {
             val devName = option?.device?.productName?.toString() ?: "既定の入力"
             statusText.text = "測定中［AAudio］: $devName / $rate Hz / " +
                 (if (ch == 2) "ステレオ" else "モノラル") + " / " + presetNames[i]
-            startButton.text = "停止"
+            startButton.text = "測定停止"
             captureStartMs = android.os.SystemClock.elapsedRealtime()
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             handler.post(uiLoop)
@@ -497,7 +838,7 @@ class MainActivity : Activity() {
     }
 
     private fun startCaptureAudioRecord() {
-        val option = options.getOrNull(deviceSpinner.selectedItemPosition)
+        val option = selectedOption()
         val sources = intArrayOf(
             MediaRecorder.AudioSource.UNPROCESSED,
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
@@ -561,7 +902,7 @@ class MainActivity : Activity() {
             }
         }
         if (started) {
-            startButton.text = "停止"
+            startButton.text = "測定停止"
             captureStartMs = android.os.SystemClock.elapsedRealtime()
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             handler.post(uiLoop)
@@ -639,8 +980,8 @@ class MainActivity : Activity() {
                 iso,
                 String.format(java.util.Locale.US, "%.2f", elapsed),
                 f(e.vu(0)), f(e.vu(1)),
-                f(e.instPeakDbfs[0]), f(e.instPeakDbfs[1]),
-                f(e.peakDbfs(0)), f(e.peakDbfs(1)),
+                f(e.tpInstDbfs[0]), f(e.tpInstDbfs[1]),
+                f(e.tpPeakDbfs(0)), f(e.tpPeakDbfs(1)),
                 f(e.momentaryLufs()), f(e.shortTermLufs()), f(e.integratedLufs()),
                 f(e.correlation()),
                 if (e.clip[0]) "1" else "0",
@@ -650,35 +991,113 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun toggleTone() {
-        if (tonePlayer.playing) {
-            tonePlayer.stop()
-            toneButton.text = "トーン OFF"
+    private fun onRefSelected(v: Double) {
+        referenceDbfs = v
+        engine?.referenceDbfs = v
+        tonePlayer.levelDbfs = v
+        setRefLabels()
+    }
+
+    /** Resets held peaks, clip lamps, and integrated loudness accumulation. */
+    private fun resetPeaks() {
+        engine?.resetPeak()
+        engine?.resetLoudness()
+        meterAvg.peakLamp = false
+        meterL.peakLamp = false
+        meterR.peakLamp = false
+        meterAvg.setLoudnessLevels(Double.NaN, Double.NaN)
+        meterL.setLoudnessLevels(Double.NaN, Double.NaN)
+        meterR.setLoudnessLevels(Double.NaN, Double.NaN)
+    }
+
+    private fun toneModeName(m: TonePlayer.Mode): String = when (m) {
+        TonePlayer.Mode.HZ100 -> "100 Hz"
+        TonePlayer.Mode.HZ1000 -> "1 kHz"
+        TonePlayer.Mode.HZ10000 -> "10 kHz"
+        TonePlayer.Mode.WHITE -> "ホワイトノイズ"
+        TonePlayer.Mode.PINK -> "ピンクノイズ"
+        TonePlayer.Mode.OFF -> ""
+    }
+
+    private fun toneRowLabel(m: TonePlayer.Mode): String =
+        if (m == TonePlayer.Mode.OFF) "OFF（停止）" else toneModeName(m)
+
+    private fun toneShortName(m: TonePlayer.Mode): String = when (m) {
+        TonePlayer.Mode.HZ100 -> "100Hz"
+        TonePlayer.Mode.HZ1000 -> "1kHz"
+        TonePlayer.Mode.HZ10000 -> "10kHz"
+        TonePlayer.Mode.WHITE -> "白色"
+        TonePlayer.Mode.PINK -> "桃色"
+        TonePlayer.Mode.OFF -> "OFF"
+    }
+
+    private fun updateToneButton() {
+        if (!::toneButton.isInitialized) return
+        val m = tonePlayer.mode
+        toneButton.text = "トーン " + toneShortName(m)
+        toneButton.setTextColor(
+            if (m == TonePlayer.Mode.OFF) Color.rgb(235, 235, 240)
+            else Color.rgb(242, 201, 110)
+        )
+        for ((mode, b) in toneModeButtons) {
+            val active = mode == m
+            b.setTextColor(
+                if (active) Color.rgb(242, 201, 110) else Color.rgb(235, 235, 240)
+            )
+            b.text = (if (active) "● " else "   ") + toneRowLabel(mode)
+        }
+    }
+
+    private fun setToneMode(mode: TonePlayer.Mode) {
+        if (mode == TonePlayer.Mode.OFF) {
+            tonePlayer.setMode(TonePlayer.Mode.OFF)
+            updateToneButton()
             statusText.text = "トーンを停止しました"
             return
         }
         tonePlayer.levelDbfs = referenceDbfs
-        val selectedName = options.getOrNull(deviceSpinner.selectedItemPosition)
-            ?.device?.productName?.toString()
+        val selectedName = selectedOption()?.device?.productName?.toString()
         val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             .filter { it.isSink }
-        val preferred = outputs.firstOrNull {
+        tonePlayer.preferredOutput = outputs.firstOrNull {
             selectedName != null && it.productName?.toString() == selectedName
         } ?: outputs.firstOrNull {
             it.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
                 it.type == AudioDeviceInfo.TYPE_USB_HEADSET
         }
-        if (tonePlayer.start(preferred)) {
-            toneButton.text = "トーン ON"
-            val dest = tonePlayer.routedDeviceName() ?: "既定の出力"
-            var msg = "1 kHzトーン出力中（${referenceDbfs.toInt()} dBFS）→ $dest"
-            if (preferred == null) {
-                msg += "\n注意: スピーカー出力の場合、本体マイク入力では音を拾ってハウリングすることがあります"
-            }
-            statusText.text = msg
-        } else {
-            statusText.text = "トーンを開始できませんでした"
+        tonePlayer.setMode(mode)
+        updateToneButton()
+        val dest = tonePlayer.routedDeviceName() ?: "既定の出力"
+        var msg = "${toneModeName(mode)}トーン出力中（${referenceDbfs.toInt()} dBFS）→ $dest"
+        if (tonePlayer.preferredOutput == null) {
+            msg += "\n注意: スピーカー出力の場合、本体マイク入力では音を拾ってハウリングすることがあります"
         }
+        statusText.text = msg
+    }
+
+    private fun syncDeviceButtons() {
+        val name = options.getOrNull(selectedDeviceIndex)
+            ?.label?.substringBefore("（") ?: "自動"
+        if (::deviceButton.isInitialized) deviceButton.text = "入力: $name"
+    }
+
+    private fun cycleDevice() {
+        if (options.size <= 1) return
+        selectedDeviceIndex = (selectedDeviceIndex + 1) % options.size
+        syncDeviceButtons()
+        if (running) startCapture()
+    }
+
+    private fun syncEngineButtons() {
+        if (::engineButton.isInitialized) {
+            engineButton.text = "エンジン: " + if (useAAudio) "AAudio" else "AudioRecord"
+        }
+    }
+
+    private fun cycleEngine() {
+        useAAudio = !useAAudio
+        syncEngineButtons()
+        if (running) startCapture()
     }
 
     private fun toggleLog() {
@@ -693,7 +1112,7 @@ class MainActivity : Activity() {
         val logger = csvLogger ?: CsvLogger(this).also { csvLogger = it }
         if (logger.start()) {
             logging = true
-            logButton.text = "ログ停止"
+            logButton.text = "CSVログ停止"
             statusText.text = "ログ記録中: ${logger.savedLocation}"
         } else {
             statusText.text = "ログファイルを作成できませんでした"
@@ -705,7 +1124,7 @@ class MainActivity : Activity() {
         logging = false
         val location = csvLogger?.savedLocation ?: ""
         csvLogger?.stop()
-        logButton.text = "ログ開始"
+        logButton.text = "CSVログ開始"
         statusText.text = "ログを保存しました: $location"
     }
 
