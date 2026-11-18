@@ -451,7 +451,7 @@ class MainActivity : Activity() {
         if (!::settingsStateText.isInitialized) return
         val modeLabel = if (displayMode == MeterView.DisplayMode.VU) "VU" else "ラウドネス"
         settingsStateText.text =
-            "基準 0 VU = ${referenceDbfs.toInt()} dBFS　モード $modeLabel　プリセット ${currentPreset().displayLabel}"
+            "基準 0 VU = ${referenceDbfs.toInt()} dBFS　モード $modeLabel"
     }
 
     private fun setRefLabels() {
