@@ -1103,6 +1103,13 @@ class VerticalLedMeterView(context: Context) : View(context) {
 
     var referenceDbfs: Double = -18.0
 
+    /** When false, the held-peak marker segment is not drawn. */
+    var peakHoldEnabled: Boolean = true
+        set(value) {
+            field = value
+            invalidate()
+        }
+
     private var levelL = -60.0
     private var levelR = -60.0
     private var holdL = -60.0
@@ -1172,8 +1179,9 @@ class VerticalLedMeterView(context: Context) : View(context) {
         val count = (plotH / segPitch).toInt().coerceAtLeast(8)
 
         fun drawBar(x0: Float, level: Double, hold: Double) {
-            val holdIdx = (((hold - minDb) / (maxDb - minDb)) * count).toInt()
-                .coerceIn(-1, count - 1)
+            val holdIdx = if (!peakHoldEnabled) -1 else
+                (((hold - minDb) / (maxDb - minDb)) * count).toInt()
+                    .coerceIn(-1, count - 1)
             for (i in 0 until count) {
                 val db = minDb + (i + 0.5) / count * (maxDb - minDb)
                 val top = plotBottom - (i + 1) * segPitch + (segPitch - segH) / 2f

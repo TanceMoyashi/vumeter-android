@@ -156,6 +156,10 @@ class VuEngine(private val sampleRate: Int) {
     /** Ring of the most recent block energies for momentary / short-term. */
     private val recentZ = ArrayDeque<Double>()
 
+    /** Per-channel block energies (zL / zR) for the per-channel loudness faces. */
+    private val blockZCh = Array(2) { ArrayList<Double>() }
+    private val recentZCh = Array(2) { ArrayDeque<Double>() }
+
     // ---- Correlation block accumulation
     private var corrLL = 0.0
     private var corrRR = 0.0
@@ -179,6 +183,10 @@ class VuEngine(private val sampleRate: Int) {
         synchronized(blockZ) {
             blockZ.clear()
             recentZ.clear()
+            blockZCh[0].clear()
+            blockZCh[1].clear()
+            recentZCh[0].clear()
+            recentZCh[1].clear()
         }
         blockSumSq[0] = 0.0
         blockSumSq[1] = 0.0
@@ -253,11 +261,18 @@ class VuEngine(private val sampleRate: Int) {
 
     private fun finishBlock(ch: Int) {
         val z0 = blockSumSq[0] / blockSamples
-        val z = if (ch > 1) z0 + blockSumSq[1] / blockSamples else z0
+        val z1 = if (ch > 1) blockSumSq[1] / blockSamples else z0
+        val z = if (ch > 1) z0 + z1 else z0
         synchronized(blockZ) {
             blockZ.add(z)
             recentZ.addLast(z)
             while (recentZ.size > 30) recentZ.removeFirst()
+            blockZCh[0].add(z0)
+            blockZCh[1].add(z1)
+            recentZCh[0].addLast(z0)
+            recentZCh[1].addLast(z1)
+            while (recentZCh[0].size > 30) recentZCh[0].removeFirst()
+            while (recentZCh[1].size > 30) recentZCh[1].removeFirst()
         }
         corrRing.addLast(doubleArrayOf(corrLL, corrRR, corrLR))
         while (corrRing.size > 10) corrRing.removeFirst()
@@ -339,6 +354,21 @@ class VuEngine(private val sampleRate: Int) {
         return loudnessOf(blocks.average())
     }
 
+    /** Short-term loudness of a single channel (per-channel loudness faces). */
+    fun shortTermLufsCh(chIdx: Int): Double {
+        val blocks: List<Double>
+        synchronized(blockZ) { blocks = recentZCh[chIdx].toList() }
+        if (blocks.isEmpty()) return Double.NaN
+        return loudnessOf(blocks.average())
+    }
+
+    /** Gated integrated loudness of a single channel (same gating as stereo). */
+    fun integratedLufsCh(chIdx: Int): Double {
+        val raw: List<Double>
+        synchronized(blockZ) { raw = blockZCh[chIdx].toList() }
+        return gatedIntegrated(raw)
+    }
+
     /**
      * Integrated loudness with BS.1770 gating: 400 ms gating blocks with
      * 75 % overlap (formed by averaging four consecutive 100 ms blocks,
@@ -348,6 +378,10 @@ class VuEngine(private val sampleRate: Int) {
     fun integratedLufs(): Double {
         val raw: List<Double>
         synchronized(blockZ) { raw = blockZ.toList() }
+        return gatedIntegrated(raw)
+    }
+
+    private fun gatedIntegrated(raw: List<Double>): Double {
         if (raw.size < 4) return Double.NaN
         val blocks400 = ArrayList<Double>(raw.size - 3)
         for (i in 0..(raw.size - 4)) {

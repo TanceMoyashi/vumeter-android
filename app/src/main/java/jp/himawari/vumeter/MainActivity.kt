@@ -62,6 +62,9 @@ class MainActivity : Activity() {
     private lateinit var infoText: TextView
     private lateinit var settingsStateText: TextView
     private lateinit var startButton: Button
+    private lateinit var frontStartButton: Button
+    private lateinit var frontModeButton: Button
+    private lateinit var holdButton: Button
     private lateinit var leverSwitch: LeverSwitchView
     private lateinit var stageView: LinearLayout
     private lateinit var stageTop: LinearLayout
@@ -145,8 +148,18 @@ class MainActivity : Activity() {
                 val sLu = if (sLufs.isNaN()) Double.NaN else sLufs - target
                 val iLu = if (iLufs.isNaN()) Double.NaN else iLufs - target
                 meterAvg.setLoudnessLevels(sLu, iLu)
-                meterL.setLoudnessLevels(sLu, iLu)
-                meterR.setLoudnessLevels(sLu, iLu)
+                val sLuL = e.shortTermLufsCh(0)
+                val iLuL = e.integratedLufsCh(0)
+                val sLuR = e.shortTermLufsCh(1)
+                val iLuR = e.integratedLufsCh(1)
+                meterL.setLoudnessLevels(
+                    if (sLuL.isNaN()) Double.NaN else sLuL - target,
+                    if (iLuL.isNaN()) Double.NaN else iLuL - target
+                )
+                meterR.setLoudnessLevels(
+                    if (sLuR.isNaN()) Double.NaN else sLuR - target,
+                    if (iLuR.isNaN()) Double.NaN else iLuR - target
+                )
 
                 meterAvg.peakLamp = e.clip[0] || e.clip[1]
                 meterL.peakLamp = e.clip[0]
@@ -298,12 +311,29 @@ class MainActivity : Activity() {
             meterAreaView,
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
         )
-        // Slim vertical LED true-peak meter (dBTP) to the right of the meters
+        // Slim vertical LED true-peak meter (dBTP) to the right of the meters,
+        // with a small HOLD toggle for the peak-hold marker underneath it
         ledMeter = VerticalLedMeterView(this)
         ledMeter.referenceDbfs = referenceDbfs
-        val ledLp = LinearLayout.LayoutParams(dp(46), LinearLayout.LayoutParams.MATCH_PARENT)
-        ledLp.setMargins(dp(5), 0, 0, 0)
-        stageTop.addView(ledMeter, ledLp)
+        val ledColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val ledColLp = LinearLayout.LayoutParams(dp(46), LinearLayout.LayoutParams.MATCH_PARENT)
+        ledColLp.setMargins(dp(5), 0, 0, 0)
+        ledColumn.addView(
+            ledMeter,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        )
+        holdButton = hwButton("HOLD", compact = true)
+        holdButton.setOnClickListener {
+            ledMeter.peakHoldEnabled = !ledMeter.peakHoldEnabled
+            syncHoldButton()
+        }
+        val holdLp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(28)
+        ).apply { setMargins(0, dp(4), 0, 0) }
+        ledColumn.addView(holdButton, holdLp)
+        stageTop.addView(ledColumn, ledColLp)
 
         stageView.addView(
             stageTop,
@@ -351,8 +381,75 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(statusText)
 
+        // Front control row: start/stop, mirrored with the panel
+        // (peak reset lives on the LED peak meter as a double-tap)
+        val frontCtrlRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        frontStartButton = hwButton("測定開始", accent = true)
+        frontStartButton.setOnClickListener {
+            if (running) stopCapture() else startCapture()
+        }
+        frontCtrlRow.addView(frontStartButton, LinearLayout.LayoutParams(0, dp(46), 1f))
+        mainLayout.addView(frontCtrlRow)
+
+        // Front mode toggle (one-touch VU <-> loudness)
+        frontModeButton = hwButton("● VU メーター　⇔　ラウドネス")
+        frontModeButton.setOnClickListener {
+            displayMode = if (displayMode == MeterView.DisplayMode.VU) {
+                MeterView.DisplayMode.LOUDNESS
+            } else {
+                MeterView.DisplayMode.VU
+            }
+            syncDisplayMode()
+        }
+        val frontModeLp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(46)
+        ).apply { setMargins(0, dp(8), 0, 0) }
+        mainLayout.addView(frontModeButton, frontModeLp)
+
         // Attach 700ms long-press handler to the main screen (single tap does nothing)
         val longPressTouchListener = View.OnTouchListener { _, event ->
+            handleMainTouch(event)
+            true
+        }
+        // Peak meter (LED) touch: long-press opens settings as elsewhere,
+        // and a double-tap resets the peaks / integrated loudness.
+        var lastLedDownMs = 0L
+        var lastLedDownX = 0f
+        var lastLedDownY = 0f
+        var ledTapSwallowed = false
+        val ledTouchListener = View.OnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val dx = event.rawX - lastLedDownX
+                    val dy = event.rawY - lastLedDownY
+                    if (lastLedDownMs > 0L && now - lastLedDownMs < 350 &&
+                        dx * dx + dy * dy < dpF(48f) * dpF(48f)
+                    ) {
+                        cancelLongPress()
+                        resetPeaks()
+                        ledTapSwallowed = true
+                        lastLedDownMs = 0L
+                        return@OnTouchListener true
+                    }
+                    lastLedDownMs = now
+                    lastLedDownX = event.rawX
+                    lastLedDownY = event.rawY
+                    ledTapSwallowed = false
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (ledTapSwallowed) {
+                        ledTapSwallowed = false
+                        return@OnTouchListener true
+                    }
+                }
+                else -> {
+                    if (ledTapSwallowed) return@OnTouchListener true
+                }
+            }
             handleMainTouch(event)
             true
         }
@@ -361,7 +458,7 @@ class MainActivity : Activity() {
         meterAvg.setOnTouchListener(longPressTouchListener)
         meterL.setOnTouchListener(longPressTouchListener)
         meterR.setOnTouchListener(longPressTouchListener)
-        ledMeter.setOnTouchListener(longPressTouchListener)
+        ledMeter.setOnTouchListener(ledTouchListener)
         bigPeakText.setOnTouchListener(longPressTouchListener)
         infoText.setOnTouchListener(longPressTouchListener)
         settingsStateText.setOnTouchListener(longPressTouchListener)
@@ -399,6 +496,7 @@ class MainActivity : Activity() {
 
         setRefLabels()
         syncDisplayMode()
+        syncHoldButton()
         updateToneButton()
         syncEngineButtons()
         syncDeviceButtons()
@@ -447,6 +545,19 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun syncHoldButton() {
+        if (!::holdButton.isInitialized || !::ledMeter.isInitialized) return
+        holdButton.setTextColor(
+            if (ledMeter.peakHoldEnabled) Color.rgb(242, 201, 110)
+            else Color.rgb(150, 150, 158)
+        )
+    }
+
+    private fun setStartButtons(label: String) {
+        if (::startButton.isInitialized) startButton.text = label
+        if (::frontStartButton.isInitialized) frontStartButton.text = label
+    }
+
     private fun updateSettingsStateText() {
         if (!::settingsStateText.isInitialized) return
         val modeLabel = if (displayMode == MeterView.DisplayMode.VU) "VU" else "ラウドネス"
@@ -488,6 +599,12 @@ class MainActivity : Activity() {
                 if (active) Color.rgb(242, 201, 110) else Color.rgb(225, 225, 232)
             )
             b.text = (if (active) "● " else "   ") + LOUDNESS_PRESETS[i].displayLabel
+        }
+        if (::frontModeButton.isInitialized) {
+            val isVu = displayMode == MeterView.DisplayMode.VU
+            frontModeButton.text =
+                if (isVu) "● VU メーター　⇔　ラウドネス" else "VU メーター　⇔　● ラウドネス"
+            frontModeButton.setTextColor(Color.rgb(235, 235, 240))
         }
         if (::meterAvg.isInitialized && ::meterRow.isInitialized) {
             applyOrientation(resources.configuration.orientation)
@@ -687,7 +804,10 @@ class MainActivity : Activity() {
     private fun applyOrientation(orientation: Int) {
         val landscape =
             orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        val showDual = landscape && displayMode == MeterView.DisplayMode.VU
+        // Landscape always shows the L / R pair (VU faces in VU mode,
+        // per-channel loudness faces in loudness mode); portrait shows
+        // the single combined L+R face.
+        val showDual = landscape
         meterAvg.visibility = if (showDual) View.GONE else View.VISIBLE
         meterRow.visibility = if (showDual) View.VISIBLE else View.GONE
     }
@@ -836,7 +956,7 @@ class MainActivity : Activity() {
             val devName = option?.device?.productName?.toString() ?: "既定の入力"
             statusText.text = "測定中［AAudio］: $devName / $rate Hz / " +
                 (if (ch == 2) "ステレオ" else "モノラル") + " / " + presetNames[i]
-            startButton.text = "測定停止"
+            setStartButtons("測定停止")
             captureStartMs = android.os.SystemClock.elapsedRealtime()
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             handler.post(uiLoop)
@@ -925,7 +1045,7 @@ class MainActivity : Activity() {
             }
         }
         if (started) {
-            startButton.text = "測定停止"
+            setStartButtons("測定停止")
             captureStartMs = android.os.SystemClock.elapsedRealtime()
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             handler.post(uiLoop)
@@ -978,7 +1098,7 @@ class MainActivity : Activity() {
                 aaNote = "（AAudio: XRun ${xr}回 / ドロップ ${dr}フレーム）"
             }
         }
-        startButton.text = "測定開始"
+        setStartButtons("測定開始")
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (statusText.text?.startsWith("測定中") == true) {
             statusText.text = "停止しました" + aaNote
