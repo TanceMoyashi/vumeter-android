@@ -1311,72 +1311,12 @@ class HorizontalPeakMeterView(context: Context) : View(context) {
     }
 }
 
-/** Slim correlation (phase) bar for the portrait layout: -1 .. +1. */
-class PhaseBarView(context: Context) : View(context) {
-
-    var correlation: Double = Double.NaN
-        set(value) {
-            field = value
-            invalidate()
-        }
-
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-
-    private fun dp(x: Float): Float = x * resources.displayMetrics.density
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        try {
-            drawBar(canvas)
-        } catch (e: Exception) {
-            // leave the bar blank this frame
-        }
-    }
-
-    private fun drawBar(canvas: Canvas) {
-        val w = width.toFloat()
-        val h = height.toFloat()
-        if (w < dp(80f) || h < dp(24f)) return
-        textPaint.textSize = dp(9f)
-        textPaint.textAlign = Paint.Align.LEFT
-        textPaint.color = Color.rgb(160, 160, 168)
-        canvas.drawText("PHASE", 0f, h / 2f + dp(3f), textPaint)
-
-        val x0 = dp(40f)
-        val x1 = w - dp(4f)
-        val cy = h / 2f
-        fun xFor(v: Double): Float = (x0 + ((v + 1.0) / 2.0) * (x1 - x0)).toFloat()
-        paint.color = Color.argb(60, 200, 200, 210)
-        canvas.drawRect(x0, cy - dp(1f), x1, cy + dp(1f), paint)
-        paint.color = Color.rgb(120, 120, 128)
-        for (v in listOf(-1.0, 0.0, 1.0)) {
-            val x = xFor(v)
-            canvas.drawRect(x - dp(0.75f), cy - dp(5f), x + dp(0.75f), cy + dp(5f), paint)
-        }
-        textPaint.textAlign = Paint.Align.CENTER
-        textPaint.color = Color.rgb(130, 130, 138)
-        canvas.drawText("-1", xFor(-1.0), cy + dp(15f), textPaint)
-        canvas.drawText("0", xFor(0.0), cy + dp(15f), textPaint)
-        canvas.drawText("+1", xFor(1.0), cy + dp(15f), textPaint)
-
-        val c = correlation
-        if (!c.isNaN()) {
-            paint.color = when {
-                c < 0.0 -> Color.rgb(240, 70, 58)
-                c < 0.3 -> Color.rgb(245, 190, 60)
-                else -> Color.rgb(74, 200, 110)
-            }
-            val x = xFor(c.coerceIn(-1.0, 1.0))
-            canvas.drawRect(x - dp(1.5f), cy - dp(8f), x + dp(1.5f), cy + dp(8f), paint)
-        }
-    }
-}
 
 /**
- * Phase panel for landscape loudness mode: a Lissajous (vectorscope)
- * trace — mono signal draws a vertical line, out-of-phase a horizontal
- * one — with a correlation bar and numeric value underneath.
+ * Phase panel: a Lissajous (vectorscope) trace — mono signal draws a
+ * vertical line, out-of-phase a horizontal one — with a correlation
+ * bar and numeric value underneath. Used beside the face in landscape
+ * loudness mode and stacked under the peak meter in portrait.
  */
 class PhaseScopeView(context: Context) : View(context) {
 

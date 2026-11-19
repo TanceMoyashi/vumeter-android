@@ -59,7 +59,7 @@ class MainActivity : Activity() {
     private lateinit var ledMeter: VerticalLedMeterView
     private lateinit var hPeakMeter: HorizontalPeakMeterView
     private lateinit var holdButtonFront: Button
-    private lateinit var phaseBar: PhaseBarView
+    private lateinit var scopeViewPortrait: PhaseScopeView
     private lateinit var scopeView: PhaseScopeView
     private lateinit var loudRow: LinearLayout
     private lateinit var peakRow: LinearLayout
@@ -211,7 +211,12 @@ class MainActivity : Activity() {
                         dispTp[0], dispTp[1],
                         e.tpPeakDbfs(0), e.tpPeakDbfs(1)
                     )
-                    phaseBar.correlation = e.correlation()
+                }
+                if (::scopeViewPortrait.isInitialized &&
+                    scopeViewPortrait.visibility == View.VISIBLE
+                ) {
+                    e.copyScope(scopeBuf)
+                    scopeViewPortrait.setData(scopeBuf, e.correlation())
                 }
                 if (::scopeView.isInitialized && scopeView.visibility == View.VISIBLE) {
                     e.copyScope(scopeBuf)
@@ -419,7 +424,7 @@ class MainActivity : Activity() {
 
         // Portrait-only strips under the face (v1.22, Ana's feedback):
         // a horizontal peak meter with the HOLD toggle at its right end,
-        // and a phase (correlation) bar underneath it.
+        // and the phase scope underneath it (v1.24).
         peakRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -440,11 +445,13 @@ class MainActivity : Activity() {
             }
         )
         mainLayout.addView(peakRow)
-        phaseBar = PhaseBarView(this)
+        // Portrait also gets the Lissajous scope, stacked under the peak
+        // meter (v1.24; the scope panel includes the correlation bar)
+        scopeViewPortrait = PhaseScopeView(this)
         mainLayout.addView(
-            phaseBar,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(38)).apply {
-                setMargins(0, dp(2), 0, 0)
+            scopeViewPortrait,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(168)).apply {
+                setMargins(0, dp(4), 0, 0)
             }
         )
 
@@ -573,6 +580,7 @@ class MainActivity : Activity() {
         meterR.setOnTouchListener(longPressTouchListener)
         ledMeter.setOnTouchListener(ledTouchListener)
         hPeakMeter.setOnTouchListener(ledTouchListener)
+        scopeViewPortrait.setOnTouchListener(longPressTouchListener)
         bigPeakText.setOnTouchListener(longPressTouchListener)
         infoText.setOnTouchListener(longPressTouchListener)
         settingsStateText.setOnTouchListener(longPressTouchListener)
@@ -964,7 +972,7 @@ class MainActivity : Activity() {
                 【表示の見方】
                 VU … 0 VU が基準レベル（既定 −18 dBFS）
                 ラウドネス … 細針＝ショートターム（3秒）、太針＝Integrated、0 LU が選択中の基準値
-                PHASE … 相関メーター（+1＝モノラル、−1＝逆相）。横画面ラウドネスではリサージュ表示
+                PHASE … リサージュ（ベクトルスコープ）と相関メーター（+1＝モノラル、−1＝逆相）。縦画面ではフェイスの下、横画面ラウドネスでは右側に表示
                 数値 … ピークはトゥルーピーク（dBTP）、LOUDNESS は M／S／I（LUFS）
                 基準レベル／表示モード／基準値プリセットは、次回起動時も保持されます
             """.trimIndent()
@@ -1007,7 +1015,7 @@ class MainActivity : Activity() {
         scopeView.visibility = if (landscape && loudness) View.VISIBLE else View.GONE
         ledColumn.visibility = if (landscape) View.VISIBLE else View.GONE
         peakRow.visibility = if (landscape) View.GONE else View.VISIBLE
-        phaseBar.visibility = if (landscape) View.GONE else View.VISIBLE
+        scopeViewPortrait.visibility = if (landscape) View.GONE else View.VISIBLE
         // Each layout has its own HOLD toggle (v1.23: no reparenting —
         // two static buttons kept in sync, see togglePeakHold()).
     }
