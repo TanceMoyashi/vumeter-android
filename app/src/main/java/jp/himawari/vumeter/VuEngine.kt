@@ -166,6 +166,22 @@ class VuEngine(private val sampleRate: Int) {
     private var corrLR = 0.0
     private val corrRing = ArrayDeque<DoubleArray>() // each: [ll, rr, lr]
 
+    // ---- Vectorscope capture: 512 decimated L/R pairs (ring buffer,
+    // written by the audio thread, read lock-free by the UI thread)
+    private val scopePairs = FloatArray(512 * 2)
+    private var scopeWrite = 0
+    private var scopeSkip = 0
+
+    /** Copy the scope pairs (oldest first, interleaved L,R) into [out]. */
+    fun copyScope(out: FloatArray) {
+        var n = 0
+        for (i in 0 until 512) {
+            val idx = (scopeWrite + i) and 511
+            out[n++] = scopePairs[idx * 2]
+            out[n++] = scopePairs[idx * 2 + 1]
+        }
+    }
+
     fun resetPeak() {
         peakLin[0] = 0.0
         peakLin[1] = 0.0
@@ -232,6 +248,13 @@ class VuEngine(private val sampleRate: Int) {
             }
             corrLL += x0 * x0
             corrRR += x1 * x1
+
+            if (++scopeSkip >= 16) {
+                scopeSkip = 0
+                scopePairs[scopeWrite * 2] = x0.toFloat()
+                scopePairs[scopeWrite * 2 + 1] = x1.toFloat()
+                scopeWrite = (scopeWrite + 1) and 511
+            }
 
             blockCount++
             if (blockCount >= blockSamples) {

@@ -1217,6 +1217,235 @@ class VerticalLedMeterView(context: Context) : View(context) {
 }
 
 /**
+ * Horizontal stereo LED true-peak meter (portrait layout): two
+ * segment bars (L over R) with the same zones and peak-hold marker
+ * as the vertical meter.
+ */
+class HorizontalPeakMeterView(context: Context) : View(context) {
+
+    var referenceDbfs: Double = -18.0
+
+    var peakHoldEnabled: Boolean = true
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    private var levelL = -60.0
+    private var levelR = -60.0
+    private var holdL = -60.0
+    private var holdR = -60.0
+
+    private val segPaint = Paint()
+    private val chanPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(200, 200, 208)
+        textAlign = Paint.Align.CENTER
+        isFakeBoldText = true
+    }
+
+    fun setPeaks(l: Double, r: Double, hl: Double, hr: Double) {
+        levelL = l
+        levelR = r
+        holdL = hl
+        holdR = hr
+        invalidate()
+    }
+
+    private fun zoneColor(db: Double, lit: Boolean): Int {
+        val zone = when {
+            db >= -9.0 -> 2
+            db >= referenceDbfs -> 1
+            else -> 0
+        }
+        return when (zone) {
+            2 -> if (lit) Color.rgb(240, 70, 58) else Color.argb(48, 240, 70, 58)
+            1 -> if (lit) Color.rgb(245, 190, 60) else Color.argb(48, 245, 190, 60)
+            else -> if (lit) Color.rgb(74, 200, 110) else Color.argb(48, 74, 200, 110)
+        }
+    }
+
+    private fun dp(x: Float): Float = x * resources.displayMetrics.density
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w < dp(80f) || h < dp(28f)) return
+        val minDb = -60.0
+        val maxDb = 0.0
+        val labelW = dp(14f)
+        val barsX = labelW
+        val barsW = w - barsX
+        val gap = dp(3f)
+        val barH = (h - gap) / 2f
+        val segPitch = dp(8f)
+        val segW = dp(5.5f)
+        val count = (barsW / segPitch).toInt().coerceAtLeast(8)
+
+        fun drawBar(y0: Float, level: Double, hold: Double) {
+            val holdIdx = if (!peakHoldEnabled) -1 else
+                (((hold - minDb) / (maxDb - minDb)) * count).toInt()
+                    .coerceIn(-1, count - 1)
+            for (i in 0 until count) {
+                val db = minDb + (i + 0.5) / count * (maxDb - minDb)
+                val left = barsX + i * segPitch + (segPitch - segW) / 2f
+                val lit = db <= level || i == holdIdx
+                segPaint.color = zoneColor(db, lit)
+                canvas.drawRect(left, y0, left + segW, y0 + barH, segPaint)
+            }
+        }
+        drawBar(0f, levelL, holdL)
+        drawBar(barH + gap, levelR, holdR)
+
+        chanPaint.textSize = dp(10f)
+        canvas.drawText("L", labelW / 2f, barH / 2f + dp(3.5f), chanPaint)
+        canvas.drawText("R", labelW / 2f, barH + gap + barH / 2f + dp(3.5f), chanPaint)
+    }
+}
+
+/** Slim correlation (phase) bar for the portrait layout: -1 .. +1. */
+class PhaseBarView(context: Context) : View(context) {
+
+    var correlation: Double = Double.NaN
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    private fun dp(x: Float): Float = x * resources.displayMetrics.density
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w < dp(80f) || h < dp(24f)) return
+        textPaint.textSize = dp(9f)
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.color = Color.rgb(160, 160, 168)
+        canvas.drawText("PHASE", 0f, h / 2f + dp(3f), textPaint)
+
+        val x0 = dp(40f)
+        val x1 = w - dp(4f)
+        val cy = h / 2f
+        fun xFor(v: Double): Float = (x0 + ((v + 1.0) / 2.0) * (x1 - x0)).toFloat()
+        paint.color = Color.argb(60, 200, 200, 210)
+        canvas.drawRect(x0, cy - dp(1f), x1, cy + dp(1f), paint)
+        paint.color = Color.rgb(120, 120, 128)
+        for (v in listOf(-1.0, 0.0, 1.0)) {
+            val x = xFor(v)
+            canvas.drawRect(x - dp(0.75f), cy - dp(5f), x + dp(0.75f), cy + dp(5f), paint)
+        }
+        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.color = Color.rgb(130, 130, 138)
+        canvas.drawText("-1", xFor(-1.0), cy + dp(15f), textPaint)
+        canvas.drawText("0", xFor(0.0), cy + dp(15f), textPaint)
+        canvas.drawText("+1", xFor(1.0), cy + dp(15f), textPaint)
+
+        val c = correlation
+        if (!c.isNaN()) {
+            paint.color = when {
+                c < 0.0 -> Color.rgb(240, 70, 58)
+                c < 0.3 -> Color.rgb(245, 190, 60)
+                else -> Color.rgb(74, 200, 110)
+            }
+            val x = xFor(c.coerceIn(-1.0, 1.0))
+            canvas.drawRect(x - dp(1.5f), cy - dp(8f), x + dp(1.5f), cy + dp(8f), paint)
+        }
+    }
+}
+
+/**
+ * Phase panel for landscape loudness mode: a Lissajous (vectorscope)
+ * trace — mono signal draws a vertical line, out-of-phase a horizontal
+ * one — with a correlation bar and numeric value underneath.
+ */
+class PhaseScopeView(context: Context) : View(context) {
+
+    private var pairs = FloatArray(512 * 2)
+    private var corr = Double.NaN
+
+    fun setData(p: FloatArray, correlation: Double) {
+        pairs = p
+        corr = correlation
+        invalidate()
+    }
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    private fun dp(x: Float): Float = x * resources.displayMetrics.density
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w < dp(60f) || h < dp(60f)) return
+        paint.color = Color.rgb(14, 15, 18)
+        canvas.drawRect(0f, 0f, w, h, paint)
+
+        textPaint.textSize = dp(10f)
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.color = Color.rgb(170, 170, 178)
+        canvas.drawText("PHASE", dp(8f), dp(14f), textPaint)
+        if (!corr.isNaN()) {
+            textPaint.textAlign = Paint.Align.RIGHT
+            canvas.drawText(
+                String.format(java.util.Locale.US, "%+.2f", corr),
+                w - dp(8f), dp(14f), textPaint
+            )
+        }
+
+        val barH = dp(24f)
+        val scopeTop = dp(18f)
+        val scopeH = h - barH - scopeTop
+        val side = minOf(w - dp(16f), scopeH)
+        val cx = w / 2f
+        val cy = scopeTop + scopeH / 2f
+        paint.color = Color.argb(50, 200, 200, 210)
+        canvas.drawLine(cx - side / 2f, cy, cx + side / 2f, cy, paint)
+        canvas.drawLine(cx, cy - side / 2f, cx, cy + side / 2f, paint)
+
+        paint.color = Color.rgb(74, 200, 110)
+        val scale = side / 2f / 1.42f
+        var i = 0
+        while (i + 1 < pairs.size) {
+            val l = pairs[i].toDouble()
+            val r = pairs[i + 1].toDouble()
+            val vx = (l - r) * 0.7071
+            val vy = (l + r) * 0.7071
+            val px = cx + (vx * scale).toFloat()
+            val py = cy - (vy * scale).toFloat()
+            canvas.drawRect(px - dp(0.8f), py - dp(0.8f), px + dp(0.8f), py + dp(0.8f), paint)
+            i += 2
+        }
+
+        val bx0 = dp(8f)
+        val bx1 = w - dp(8f)
+        val by = h - dp(10f)
+        fun xFor(v: Double): Float = (bx0 + ((v + 1.0) / 2.0) * (bx1 - bx0)).toFloat()
+        paint.color = Color.argb(60, 200, 200, 210)
+        canvas.drawRect(bx0, by - dp(1f), bx1, by + dp(1f), paint)
+        paint.color = Color.rgb(120, 120, 128)
+        for (v in listOf(-1.0, 0.0, 1.0)) {
+            val x = xFor(v)
+            canvas.drawRect(x - dp(0.75f), by - dp(4f), x + dp(0.75f), by + dp(4f), paint)
+        }
+        if (!corr.isNaN()) {
+            paint.color = when {
+                corr < 0.0 -> Color.rgb(240, 70, 58)
+                corr < 0.3 -> Color.rgb(245, 190, 60)
+                else -> Color.rgb(74, 200, 110)
+            }
+            val x = xFor(corr.coerceIn(-1.0, 1.0))
+            canvas.drawRect(x - dp(1.5f), by - dp(7f), x + dp(1.5f), by + dp(7f), paint)
+        }
+    }
+}
+
+/**
  * Slide (segmented) switch for the reference level: a pill track
  * with one cell per value; tap or drag across to select. Works
  * horizontally (portrait strip) or vertically (landscape column,

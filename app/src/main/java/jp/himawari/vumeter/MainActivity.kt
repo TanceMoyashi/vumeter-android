@@ -57,6 +57,13 @@ class MainActivity : Activity() {
     private lateinit var meterL: MeterView
     private lateinit var meterR: MeterView
     private lateinit var ledMeter: VerticalLedMeterView
+    private lateinit var hPeakMeter: HorizontalPeakMeterView
+    private lateinit var phaseBar: PhaseBarView
+    private lateinit var scopeView: PhaseScopeView
+    private lateinit var loudRow: LinearLayout
+    private lateinit var peakRow: LinearLayout
+    private lateinit var ledColumn: LinearLayout
+    private val scopeBuf = FloatArray(512 * 2)
     private lateinit var statusText: TextView
     private lateinit var bigPeakText: TextView
     private lateinit var infoText: TextView
@@ -198,6 +205,17 @@ class MainActivity : Activity() {
                     dispTp[0], dispTp[1],
                     e.tpPeakDbfs(0), e.tpPeakDbfs(1)
                 )
+                if (::hPeakMeter.isInitialized && peakRow.visibility == View.VISIBLE) {
+                    hPeakMeter.setPeaks(
+                        dispTp[0], dispTp[1],
+                        e.tpPeakDbfs(0), e.tpPeakDbfs(1)
+                    )
+                    phaseBar.correlation = e.correlation()
+                }
+                if (::scopeView.isInitialized && scopeView.visibility == View.VISIBLE) {
+                    e.copyScope(scopeBuf)
+                    scopeView.setData(scopeBuf, e.correlation())
+                }
                 tickCount++
                 if (tickCount % 5 == 0) {
                     bigPeakText.text = String.format(
@@ -231,6 +249,17 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         audioManager = getSystemService(AudioManager::class.java)
+        // Restore the previous session's settings (v1.22, Ana's feedback:
+        // the reference level used to fall back to -18 dBFS on every start)
+        val prefs = getSharedPreferences("vumeter", MODE_PRIVATE)
+        referenceDbfs = prefs.getFloat("reference_dbfs", -18f).toDouble()
+        displayMode = if (prefs.getString("display_mode", "VU") == "LOUDNESS") {
+            MeterView.DisplayMode.LOUDNESS
+        } else {
+            MeterView.DisplayMode.VU
+        }
+        selectedPresetIndex = prefs.getInt("preset_index", 0)
+            .coerceIn(0, LOUDNESS_PRESETS.size - 1)
         buildUi()
         // Predictive back (API 33+): with the settings panel open, the back
         // button / gesture returns to the meter panel instead of finishing.
@@ -305,8 +334,23 @@ class MainActivity : Activity() {
         meterAvg = MeterView(this).apply {
             channelLabel = "L+R"
         }
-        meterAreaView.addView(
+        // Combined face, optionally side by side with the phase scope
+        // (landscape loudness); the scope is GONE in other layouts.
+        loudRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        loudRow.addView(
             meterAvg,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+        )
+        scopeView = PhaseScopeView(this)
+        loudRow.addView(
+            scopeView,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+        )
+        meterAreaView.addView(
+            loudRow,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.MATCH_PARENT
@@ -346,7 +390,7 @@ class MainActivity : Activity() {
         // with a small HOLD toggle for the peak-hold marker underneath it
         ledMeter = VerticalLedMeterView(this)
         ledMeter.referenceDbfs = referenceDbfs
-        val ledColumn = LinearLayout(this).apply {
+        ledColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
         val ledColLp = LinearLayout.LayoutParams(dp(46), LinearLayout.LayoutParams.MATCH_PARENT)
@@ -357,7 +401,9 @@ class MainActivity : Activity() {
         )
         holdButton = hwButton("HOLD", compact = true)
         holdButton.setOnClickListener {
-            ledMeter.peakHoldEnabled = !ledMeter.peakHoldEnabled
+            val on = !ledMeter.peakHoldEnabled
+            ledMeter.peakHoldEnabled = on
+            if (::hPeakMeter.isInitialized) hPeakMeter.peakHoldEnabled = on
             syncHoldButton()
         }
         val holdLp = LinearLayout.LayoutParams(
@@ -373,6 +419,29 @@ class MainActivity : Activity() {
         mainLayout.addView(
             stageView,
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        )
+
+        // Portrait-only strips under the face (v1.22, Ana's feedback):
+        // a horizontal peak meter with the HOLD toggle at its right end,
+        // and a phase (correlation) bar underneath it.
+        peakRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, 0)
+        }
+        hPeakMeter = HorizontalPeakMeterView(this)
+        hPeakMeter.referenceDbfs = referenceDbfs
+        peakRow.addView(
+            hPeakMeter,
+            LinearLayout.LayoutParams(0, dp(46), 1f)
+        )
+        mainLayout.addView(peakRow)
+        phaseBar = PhaseBarView(this)
+        mainLayout.addView(
+            phaseBar,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(38)).apply {
+                setMargins(0, dp(2), 0, 0)
+            }
         )
 
         // Front-panel readouts (always visible, v1.18): peak dBTP, VU/loudness
@@ -482,6 +551,7 @@ class MainActivity : Activity() {
         meterL.setOnTouchListener(longPressTouchListener)
         meterR.setOnTouchListener(longPressTouchListener)
         ledMeter.setOnTouchListener(ledTouchListener)
+        hPeakMeter.setOnTouchListener(ledTouchListener)
         bigPeakText.setOnTouchListener(longPressTouchListener)
         infoText.setOnTouchListener(longPressTouchListener)
         settingsStateText.setOnTouchListener(longPressTouchListener)
@@ -629,6 +699,7 @@ class MainActivity : Activity() {
         meterL.refLabel = label
         meterR.refLabel = label
         if (::ledMeter.isInitialized) ledMeter.referenceDbfs = referenceDbfs
+        if (::hPeakMeter.isInitialized) hPeakMeter.referenceDbfs = referenceDbfs
         if (::leverSwitch.isInitialized) leverSwitch.value = referenceDbfs
         updateSettingsStateText()
     }
@@ -662,6 +733,7 @@ class MainActivity : Activity() {
             applyOrientation(resources.configuration.orientation)
         }
         updateSettingsStateText()
+        savePrefs()
     }
 
     /**
@@ -718,13 +790,21 @@ class MainActivity : Activity() {
         }
         ctrlRow.addView(startButton, LinearLayout.LayoutParams(0, dp(46), 1f))
 
-        resetButton = hwButton("ピーク / Integrated リセット")
-        resetButton.setOnClickListener { resetPeaks() }
+        resetButton = hwButton("ピーク リセット")
+        resetButton.setOnClickListener { resetPeaksOnly() }
         val resetLp = LinearLayout.LayoutParams(0, dp(46), 1f).apply {
             setMargins(dp(8), 0, 0, 0)
         }
         ctrlRow.addView(resetButton, resetLp)
         container.addView(ctrlRow, ctrlLp)
+
+        // Integrated-only reset (v1.22, Ana's feedback)
+        val integratedResetButton = hwButton("Integrated リセット")
+        integratedResetButton.setOnClickListener { resetIntegrated() }
+        val irLp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(46)
+        ).apply { setMargins(0, dp(8), 0, 0) }
+        container.addView(integratedResetButton, irLp)
 
         fun sectionHeader(title: String): TextView = TextView(this).apply {
             text = title
@@ -843,9 +923,10 @@ class MainActivity : Activity() {
                 タップ … VU ⇔ ラウドネスの切り替え
                 ダブルタップ … 測定の開始／停止
                 長押し（0.7秒）… 設定画面を開く
-                LEDピークメーターをダブルタップ … ピーク／Integrated のリセット
-                LEDメーター下の HOLD … ピークホールド表示のオン／オフ
+                ピークメーターをダブルタップ … ピーク／Integrated のリセット
+                HOLD … ピークホールド表示のオン／オフ（縦画面は横型ピークメーターの右、横画面は LED メーターの下）
                 ランプ … 緑＝測定中、赤＝停止中
+                ピークと Integrated は、設定画面で個別にリセットできます
 
                 【設定画面から戻る】
                 戻るボタン／戻るジェスチャー、または「メーターへ戻る」
@@ -853,7 +934,9 @@ class MainActivity : Activity() {
                 【表示の見方】
                 VU … 0 VU が基準レベル（既定 −18 dBFS）
                 ラウドネス … 細針＝ショートターム（3秒）、太針＝Integrated、0 LU が選択中の基準値
+                PHASE … 相関メーター（+1＝モノラル、−1＝逆相）。横画面ラウドネスではリサージュ表示
                 数値 … ピークはトゥルーピーク（dBTP）、LOUDNESS は M／S／I（LUFS）
+                基準レベル／表示モード／基準値プリセットは、次回起動時も保持されます
             """.trimIndent()
         }
         container.addView(manualText)
@@ -883,12 +966,38 @@ class MainActivity : Activity() {
     private fun applyOrientation(orientation: Int) {
         val landscape =
             orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        // Landscape always shows the L / R pair (VU faces in VU mode,
-        // per-channel loudness faces in loudness mode); portrait shows
-        // the single combined L+R face.
-        val showDual = landscape
-        meterAvg.visibility = if (showDual) View.GONE else View.VISIBLE
-        meterRow.visibility = if (showDual) View.VISIBLE else View.GONE
+        // Layout matrix (v1.22, Ana's feedback; face proportions unchanged):
+        //  - portrait: combined face + horizontal peak meter + phase bar
+        //  - landscape VU: L / R faces + vertical LED meter
+        //  - landscape loudness: combined loudness face + phase scope
+        //    + vertical LED meter
+        val loudness = displayMode == MeterView.DisplayMode.LOUDNESS
+        meterRow.visibility = if (landscape && !loudness) View.VISIBLE else View.GONE
+        loudRow.visibility = if (landscape && !loudness) View.GONE else View.VISIBLE
+        scopeView.visibility = if (landscape && loudness) View.VISIBLE else View.GONE
+        ledColumn.visibility = if (landscape) View.VISIBLE else View.GONE
+        peakRow.visibility = if (landscape) View.GONE else View.VISIBLE
+        phaseBar.visibility = if (landscape) View.GONE else View.VISIBLE
+        // The HOLD toggle lives under the vertical LED meter in landscape
+        // and at the right end of the horizontal peak meter in portrait.
+        if (::holdButton.isInitialized) {
+            (holdButton.parent as? android.view.ViewGroup)?.removeView(holdButton)
+            if (landscape) {
+                ledColumn.addView(
+                    holdButton,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, dp(28)
+                    ).apply { setMargins(0, dp(4), 0, 0) }
+                )
+            } else {
+                peakRow.addView(
+                    holdButton,
+                    LinearLayout.LayoutParams(dp(56), dp(36)).apply {
+                        setMargins(dp(6), 0, 0, 0)
+                    }
+                )
+            }
+        }
     }
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
@@ -1213,20 +1322,44 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun savePrefs() {
+        getSharedPreferences("vumeter", MODE_PRIVATE).edit()
+            .putFloat("reference_dbfs", referenceDbfs.toFloat())
+            .putString(
+                "display_mode",
+                if (displayMode == MeterView.DisplayMode.LOUDNESS) "LOUDNESS" else "VU"
+            )
+            .putInt("preset_index", selectedPresetIndex)
+            .apply()
+    }
+
     private fun onRefSelected(v: Double) {
         referenceDbfs = v
         engine?.referenceDbfs = v
         tonePlayer.levelDbfs = v
         setRefLabels()
+        savePrefs()
     }
 
     /** Resets held peaks, clip lamps, and integrated loudness accumulation. */
     private fun resetPeaks() {
+        resetPeaksOnly()
+        resetIntegrated()
+    }
+
+    /** Peak-only reset (held peaks and clip lamps). */
+    private fun resetPeaksOnly() {
         engine?.resetPeak()
-        engine?.resetLoudness()
         meterAvg.peakLamp = false
         meterL.peakLamp = false
         meterR.peakLamp = false
+    }
+
+    /** Integrated-only reset (v1.22, Ana's feedback: restart the
+     *  Integrated measurement from the top of a program without
+     *  clearing the held peaks). */
+    private fun resetIntegrated() {
+        engine?.resetLoudness()
         meterAvg.setLoudnessLevels(Double.NaN, Double.NaN)
         meterL.setLoudnessLevels(Double.NaN, Double.NaN)
         meterR.setLoudnessLevels(Double.NaN, Double.NaN)
