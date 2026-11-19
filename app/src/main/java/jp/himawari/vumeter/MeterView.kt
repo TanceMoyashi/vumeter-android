@@ -1268,6 +1268,14 @@ class HorizontalPeakMeterView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        try {
+            drawBars(canvas)
+        } catch (e: Exception) {
+            // leave the meter blank this frame
+        }
+    }
+
+    private fun drawBars(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
         if (w < dp(80f) || h < dp(28f)) return
@@ -1319,6 +1327,14 @@ class PhaseBarView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        try {
+            drawBar(canvas)
+        } catch (e: Exception) {
+            // leave the bar blank this frame
+        }
+    }
+
+    private fun drawBar(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
         if (w < dp(80f) || h < dp(24f)) return
@@ -1364,11 +1380,12 @@ class PhaseBarView(context: Context) : View(context) {
  */
 class PhaseScopeView(context: Context) : View(context) {
 
-    private var pairs = FloatArray(512 * 2)
+    private val pairs = FloatArray(512 * 2)
     private var corr = Double.NaN
 
     fun setData(p: FloatArray, correlation: Double) {
-        pairs = p
+        // Copy into our own buffer so the caller's array can be reused
+        System.arraycopy(p, 0, pairs, 0, minOf(p.size, pairs.size))
         corr = correlation
         invalidate()
     }
@@ -1380,6 +1397,15 @@ class PhaseScopeView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        // A drawing fault must never take the meter down mid-show
+        try {
+            drawScope(canvas)
+        } catch (e: Exception) {
+            // leave the panel blank this frame
+        }
+    }
+
+    private fun drawScope(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
         if (w < dp(60f) || h < dp(60f)) return
@@ -1401,7 +1427,7 @@ class PhaseScopeView(context: Context) : View(context) {
         val barH = dp(24f)
         val scopeTop = dp(18f)
         val scopeH = h - barH - scopeTop
-        val side = minOf(w - dp(16f), scopeH)
+        val side = minOf(w - dp(16f), scopeH).coerceAtLeast(0f)
         val cx = w / 2f
         val cy = scopeTop + scopeH / 2f
         paint.color = Color.argb(50, 200, 200, 210)

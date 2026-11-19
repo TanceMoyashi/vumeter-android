@@ -58,6 +58,7 @@ class MainActivity : Activity() {
     private lateinit var meterR: MeterView
     private lateinit var ledMeter: VerticalLedMeterView
     private lateinit var hPeakMeter: HorizontalPeakMeterView
+    private lateinit var holdButtonFront: Button
     private lateinit var phaseBar: PhaseBarView
     private lateinit var scopeView: PhaseScopeView
     private lateinit var loudRow: LinearLayout
@@ -400,12 +401,7 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         )
         holdButton = hwButton("HOLD", compact = true)
-        holdButton.setOnClickListener {
-            val on = !ledMeter.peakHoldEnabled
-            ledMeter.peakHoldEnabled = on
-            if (::hPeakMeter.isInitialized) hPeakMeter.peakHoldEnabled = on
-            syncHoldButton()
-        }
+        holdButton.setOnClickListener { togglePeakHold() }
         val holdLp = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(28)
         ).apply { setMargins(0, dp(4), 0, 0) }
@@ -435,6 +431,14 @@ class MainActivity : Activity() {
             hPeakMeter,
             LinearLayout.LayoutParams(0, dp(46), 1f)
         )
+        holdButtonFront = hwButton("HOLD", compact = true)
+        holdButtonFront.setOnClickListener { togglePeakHold() }
+        peakRow.addView(
+            holdButtonFront,
+            LinearLayout.LayoutParams(dp(56), dp(36)).apply {
+                setMargins(dp(6), 0, 0, 0)
+            }
+        )
         mainLayout.addView(peakRow)
         phaseBar = PhaseBarView(this)
         mainLayout.addView(
@@ -443,6 +447,23 @@ class MainActivity : Activity() {
                 setMargins(0, dp(2), 0, 0)
             }
         )
+
+        // Front Integrated reset (v1.23, Ana's feedback: a lone button
+        // under the meter, no need to open the settings panel)
+        val frontResetRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, 0)
+        }
+        val frontIntegratedButton = hwButton("Integrated リセット", compact = true)
+        frontIntegratedButton.setOnClickListener { resetIntegrated() }
+        frontResetRow.addView(
+            frontIntegratedButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, dp(36)
+            )
+        )
+        mainLayout.addView(frontResetRow)
 
         // Front-panel readouts (always visible, v1.18): peak dBTP, VU/loudness
         // values, current settings values (small), and the measurement status line.
@@ -663,12 +684,21 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Shared HOLD toggle for the vertical LED meter (landscape) and
+     *  the horizontal peak meter (portrait); both buttons stay in sync. */
+    private fun togglePeakHold() {
+        val on = !ledMeter.peakHoldEnabled
+        ledMeter.peakHoldEnabled = on
+        if (::hPeakMeter.isInitialized) hPeakMeter.peakHoldEnabled = on
+        syncHoldButton()
+    }
+
     private fun syncHoldButton() {
-        if (!::holdButton.isInitialized || !::ledMeter.isInitialized) return
-        holdButton.setTextColor(
-            if (ledMeter.peakHoldEnabled) Color.rgb(242, 201, 110)
+        if (!::ledMeter.isInitialized) return
+        val color = if (ledMeter.peakHoldEnabled) Color.rgb(242, 201, 110)
             else Color.rgb(150, 150, 158)
-        )
+        if (::holdButton.isInitialized) holdButton.setTextColor(color)
+        if (::holdButtonFront.isInitialized) holdButtonFront.setTextColor(color)
     }
 
     private fun lampDrawable(on: Boolean): android.graphics.drawable.GradientDrawable =
@@ -926,7 +956,7 @@ class MainActivity : Activity() {
                 ピークメーターをダブルタップ … ピーク／Integrated のリセット
                 HOLD … ピークホールド表示のオン／オフ（縦画面は横型ピークメーターの右、横画面は LED メーターの下）
                 ランプ … 緑＝測定中、赤＝停止中
-                ピークと Integrated は、設定画面で個別にリセットできます
+                Integrated のリセットは、メイン画面右下のボタンでもできます（ピークとは個別）
 
                 【設定画面から戻る】
                 戻るボタン／戻るジェスチャー、または「メーターへ戻る」
@@ -978,26 +1008,8 @@ class MainActivity : Activity() {
         ledColumn.visibility = if (landscape) View.VISIBLE else View.GONE
         peakRow.visibility = if (landscape) View.GONE else View.VISIBLE
         phaseBar.visibility = if (landscape) View.GONE else View.VISIBLE
-        // The HOLD toggle lives under the vertical LED meter in landscape
-        // and at the right end of the horizontal peak meter in portrait.
-        if (::holdButton.isInitialized) {
-            (holdButton.parent as? android.view.ViewGroup)?.removeView(holdButton)
-            if (landscape) {
-                ledColumn.addView(
-                    holdButton,
-                    LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT, dp(28)
-                    ).apply { setMargins(0, dp(4), 0, 0) }
-                )
-            } else {
-                peakRow.addView(
-                    holdButton,
-                    LinearLayout.LayoutParams(dp(56), dp(36)).apply {
-                        setMargins(dp(6), 0, 0, 0)
-                    }
-                )
-            }
-        }
+        // Each layout has its own HOLD toggle (v1.23: no reparenting —
+        // two static buttons kept in sync, see togglePeakHold()).
     }
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
