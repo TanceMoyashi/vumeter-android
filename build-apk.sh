@@ -19,7 +19,7 @@ $CLANGXX -shared -fPIC -O2 -o $OUT/lib/arm64-v8a/libaaudio_capture.so $SRC/app/s
 $BT/d8 --release --lib $AJAR --output $OUT/dex $OUT/classes.jar ~/tools/kotlinc/lib/kotlin-stdlib.jar
 $BT/aapt2 compile --dir $SRC/app/src/main/res -o $OUT/res.zip
 $BT/aapt2 link -o $OUT/base.apk -I $AJAR --manifest $SRC/app/src/main/AndroidManifest.xml \
-  --min-sdk-version 31 --target-sdk-version 36 --version-code 25 --version-name 1.24 \
+  --min-sdk-version 31 --target-sdk-version 36 --version-code 26 --version-name 1.25 \
   $OUT/res.zip
 (cd $OUT/dex && $BT/aapt add ../base.apk classes.dex)
 (cd $OUT && $BT/aapt add base.apk lib/arm64-v8a/libaaudio_capture.so)

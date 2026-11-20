@@ -297,8 +297,10 @@ class VuEngine(private val sampleRate: Int) {
             while (recentZCh[0].size > 30) recentZCh[0].removeFirst()
             while (recentZCh[1].size > 30) recentZCh[1].removeFirst()
         }
-        corrRing.addLast(doubleArrayOf(corrLL, corrRR, corrLR))
-        while (corrRing.size > 10) corrRing.removeFirst()
+        synchronized(corrRing) {
+            corrRing.addLast(doubleArrayOf(corrLL, corrRR, corrLR))
+            while (corrRing.size > 10) corrRing.removeFirst()
+        }
         blockSumSq[0] = 0.0
         blockSumSq[1] = 0.0
         corrLL = 0.0
@@ -424,10 +426,15 @@ class VuEngine(private val sampleRate: Int) {
     /** Phase correlation in [-1, +1] over the last second. NaN if silent. */
     fun correlation(): Double {
         if (channels < 2) return 1.0
+        // Snapshot under the corrRing lock, aggregate outside it: the
+        // audio thread mutates corrRing in finishBlock. Elements are
+        // never mutated after insertion, so a shallow copy is safe.
+        val snapshot = synchronized(corrRing) { corrRing.toList() }
+        if (snapshot.isEmpty()) return Double.NaN
         var ll = 0.0
         var rr = 0.0
         var lr = 0.0
-        for (b in corrRing) {
+        for (b in snapshot) {
             ll += b[0]; rr += b[1]; lr += b[2]
         }
         val den = sqrt(ll * rr)

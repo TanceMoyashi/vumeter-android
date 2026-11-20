@@ -1,6 +1,6 @@
 # VUメーター 取扱説明書
 
-対象バージョン： v1.24（versionCode 25）
+対象バージョン： v1.25（versionCode 26）
 パッケージ名： jp.himawari.vumeter
 
 ## 1. 概要
